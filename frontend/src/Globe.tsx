@@ -44,6 +44,21 @@ function labelColor(place: Place): string {
   return "rgba(200, 210, 240, 0.9)";
 }
 
+// globe.gl frames the scene by VERTICAL field of view, so a portrait phone
+// crops the globe's left and right edges. Pull the camera back far enough that
+// whichever axis is tighter still fits. Never closer than the desktop default.
+const DEFAULT_ALTITUDE = 2.5;
+const CAMERA_FOV_DEG = 50; // three.js perspective camera default used by globe.gl
+
+function fitAltitude(width: number, height: number): number {
+  if (!width || !height) return DEFAULT_ALTITUDE;
+  const halfV = (CAMERA_FOV_DEG / 2) * (Math.PI / 180);
+  const halfH = Math.atan(Math.tan(halfV) * (width / height));
+  const limiting = Math.min(halfV, halfH) * 0.97; // snug fit, small edge margin
+  // Globe radius is 1 unit here; altitude is expressed in radii above surface.
+  return Math.max(DEFAULT_ALTITUDE, 1 / Math.sin(limiting) - 1);
+}
+
 function inSpan(place: Place, lat: number, lng: number, span: number): boolean {
   if (Math.abs(place.lat - lat) > span) return false;
   let dLng = Math.abs(place.lng - lng);
@@ -160,8 +175,11 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
     };
     mat.color.set("#0a0f1f");
 
-    globe.width(containerRef.current.clientWidth);
-    globe.height(containerRef.current.clientHeight);
+    const w0 = containerRef.current.clientWidth;
+    const h0 = containerRef.current.clientHeight;
+    globe.width(w0);
+    globe.height(h0);
+    globe.pointOfView({ altitude: fitAltitude(w0, h0) });
     globeRef.current = globe;
     if (import.meta.env.DEV) {
       (window as unknown as { __globe: typeof globe }).__globe = globe;
@@ -174,8 +192,16 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
 
     const onResize = () => {
       if (!containerRef.current) return;
-      globe.width(containerRef.current.clientWidth);
-      globe.height(containerRef.current.clientHeight);
+      const w = containerRef.current.clientWidth;
+      const h = containerRef.current.clientHeight;
+      globe.width(w);
+      globe.height(h);
+      // Re-fit on rotation, but only while still zoomed out — never yank the
+      // camera away from a place the user has navigated to.
+      if (zoomRef.current === 0) {
+        const pov = globe.pointOfView();
+        globe.pointOfView({ ...pov, altitude: fitAltitude(w, h) });
+      }
     };
     window.addEventListener("resize", onResize);
     // Initial data load happens via the days effect below.
