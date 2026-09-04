@@ -29,6 +29,7 @@ const CELL_SIZE: Record<Place["tier"], number> = {
 export default function App() {
   const [days, setDays] = useState(7);
   const [selection, setSelection] = useState<Selection | null>(null);
+  const [trendingOpen, setTrendingOpen] = useState(false);
   const globeApi = useRef<GlobeApi | null>(null);
 
   function selectPlace(place: Place) {
@@ -49,6 +50,7 @@ export default function App() {
       name: event.location_name,
       cellSize: 1,
     });
+    setTrendingOpen(false); // on phones the card covers the globe; get out of the way
   }
 
   return (
@@ -83,7 +85,16 @@ export default function App() {
         }
       />
 
-      <TrendingPanel days={days} onSelect={selectTrending} />
+      <button
+        className="trending-toggle"
+        onClick={() => setTrendingOpen((v) => !v)}
+        aria-label="Toggle trending news"
+        aria-expanded={trendingOpen}
+      >
+        🔥
+      </button>
+
+      <TrendingPanel days={days} onSelect={selectTrending} open={trendingOpen} />
 
       <EventPanel selection={selection} days={days} onClose={() => setSelection(null)} />
     </div>

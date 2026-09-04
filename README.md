@@ -4,6 +4,8 @@ Live protest and civil-unrest events from around the world, rendered as an inter
 
 Features: heat-scaled event circles that merge/split with zoom, progressive place labels (countries → states → cities, from [Natural Earth](https://www.naturalearthdata.com/) via `frontend/src/data/*.json`), place search with fly-to, a top-3 trending card, and an infinite-scroll event panel sorted by mention count.
 
+Installable PWA with a mobile-first layout: on phones the event panel becomes a bottom sheet, trending collapses behind a 🔥 toggle, and search takes the full top row. The service worker precaches the app shell (`npm run build` generates it; install prompts require HTTPS in production).
+
 ## Architecture
 
 ```

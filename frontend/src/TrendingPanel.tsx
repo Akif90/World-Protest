@@ -6,9 +6,11 @@ import { eventHeadline } from "./headline";
 interface TrendingPanelProps {
   days: number;
   onSelect: (event: ProtestEvent) => void;
+  /** On phones the card is hidden behind a toggle; desktop always shows it. */
+  open: boolean;
 }
 
-export default function TrendingPanel({ days, onSelect }: TrendingPanelProps) {
+export default function TrendingPanel({ days, onSelect, open }: TrendingPanelProps) {
   const [trending, setTrending] = useState<ProtestEvent[]>([]);
   const [mostRead, setMostRead] = useState<ProtestEvent[]>([]);
 
@@ -41,7 +43,7 @@ export default function TrendingPanel({ days, onSelect }: TrendingPanelProps) {
   );
 
   return (
-    <aside className="trending-card">
+    <aside className={`trending-card${open ? " open" : ""}`}>
       {trending.length > 0 && (
         <section>
           <h3>🔥 Trending now</h3>
