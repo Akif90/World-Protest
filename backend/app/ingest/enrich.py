@@ -27,11 +27,15 @@ HEADERS = {
 def _clean_title(raw: str) -> str:
     title = html.unescape(raw).strip()
     title = re.sub(r"\s+", " ", title)
-    # Strip a trailing site-name segment ("Headline | The Daily Times") when
-    # what's left still looks like a headline.
-    parts = re.split(r"\s+[|\-–—]\s+", title)
-    if len(parts) > 1 and len(" ".join(parts[:-1])) >= 25:
-        title = " ".join(parts[:-1]).strip()
+    # Strip trailing site-name segments ("Headline | WGCU News | PBS & NPR").
+    # Titles overwhelmingly lead with the headline, so keep the FIRST segment
+    # -- joining all-but-the-last silently retained middle site names, which
+    # both uglified headlines and split otherwise-identical stories apart.
+    # The length guard leaves "Short - but real headline" untouched, since a
+    # first segment that brief is more likely a fragment than a full headline.
+    parts = [p for p in re.split(r"\s+[|\u2013\u2014\u00b7\u2022\-]\s+", title) if p.strip()]
+    if len(parts) > 1 and len(parts[0].strip()) >= 25:
+        title = parts[0].strip()
     return title[:500]
 
 

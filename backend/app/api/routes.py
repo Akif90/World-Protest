@@ -1,7 +1,8 @@
 from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
+from sqlalchemy.orm import aliased
 
 from app.db import Event, EventOpen, SessionLocal
 
@@ -14,6 +15,23 @@ MAX_ZOOM = max(CELL_SIZES)
 
 def _since(days: int) -> date:
     return date.today() - timedelta(days=days)
+
+
+def _story_key():
+    """Expression identifying one distinct story.
+
+    GDELT emits a separate event per (article x location the article mentions),
+    so one story can appear a dozen times -- in this dataset a single article
+    was geocoded to 8 different places, and another produced 17 rows from just
+    3 URLs. Title is the better key because syndicated copies share a headline
+    across several URLs; fall back to the URL, then to the event id so rows
+    with neither never collapse into each other.
+    """
+    return func.coalesce(
+        func.nullif(Event.article_title, ""),
+        Event.source_url,
+        cast(Event.global_event_id, String),
+    )
 
 
 @router.get("/points")
@@ -34,7 +52,7 @@ def points(
         select(
             cell_lat,
             cell_lon,
-            func.count().label("count"),
+            func.count(func.distinct(_story_key())).label("count"),
             func.sum(Event.num_mentions).label("mentions"),
             func.mode().within_group(Event.location_name).label("top_location"),
         )
@@ -82,16 +100,28 @@ def events(
         Event.lat.between(min_lat, max_lat),
         Event.lon.between(min_lon, max_lon),
     )
-    stmt = (
+    key = _story_key()
+    # DISTINCT ON keeps one row per story; ordering by mentions inside each
+    # group keeps the most-covered instance as the representative. Mentions are
+    # deliberately NOT summed across duplicates -- they are repeated counts of
+    # the same article, so the max reflects reach and a sum would inflate it.
+    deduped = (
         select(Event)
         .where(*where)
-        .order_by(Event.num_mentions.desc(), Event.global_event_id)
+        .distinct(key)
+        .order_by(key, Event.num_mentions.desc(), Event.global_event_id)
+        .subquery()
+    )
+    story = aliased(Event, deduped)
+    stmt = (
+        select(story)
+        .order_by(story.num_mentions.desc(), story.global_event_id)
         .offset(offset)
         .limit(limit)
     )
     with SessionLocal() as session:
         total = session.execute(
-            select(func.count()).select_from(Event).where(*where)
+            select(func.count(func.distinct(key))).where(*where)
         ).scalar()
         rows = session.execute(stmt).scalars().all()
     return {"total": total, "events": [_event_json(e) for e in rows]}
