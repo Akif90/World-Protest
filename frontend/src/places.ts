@@ -16,6 +16,8 @@ export interface Place {
   tier: PlaceTier;
   pop: number;
   areaRank: number; // countries only; states/cities get Infinity
+  /** Lowercased name, precomputed once so search never re-allocates per key. */
+  search: string;
 }
 
 const topo = countriesTopo as unknown as Topology<Objects>;
@@ -37,6 +39,7 @@ export const countryPlaces: Place[] = countries.features
       tier: "country" as const,
       pop: 0,
       areaRank: i,
+      search: f.properties.name.toLowerCase(),
     };
   })
   .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
@@ -51,6 +54,7 @@ export const statePlaces: Place[] = (
   tier: "state" as const,
   pop: 0,
   areaRank: Infinity,
+  search: s.n.toLowerCase(),
 }));
 
 export const cityPlaces: Place[] = (
@@ -63,6 +67,7 @@ export const cityPlaces: Place[] = (
   lng: c.lng,
   pop: c.p,
   areaRank: Infinity,
+  search: c.n.toLowerCase(),
 }));
 
 const allPlaces: Place[] = [...countryPlaces, ...statePlaces, ...cityPlaces];
@@ -75,7 +80,9 @@ export function searchPlaces(query: string, limit = 8): Place[] {
   if (q.length < 2) return [];
   const scored: Array<{ place: Place; score: number }> = [];
   for (const place of allPlaces) {
-    const name = place.name.toLowerCase();
+    // place.search is precomputed; lowercasing 8,600 names on every keystroke
+    // was the dominant cost of typing, on the same thread driving the globe.
+    const name = place.search;
     let score = -1;
     if (name === q) score = 6e9;
     else if (name.startsWith(q)) score = 4e9;

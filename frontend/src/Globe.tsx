@@ -1,142 +1,35 @@
 import { useEffect, useRef } from "react";
 import GlobeGL from "globe.gl";
 import { latLngToCell } from "h3-js";
-import type { GridPoint, PointsResponse } from "./api";
+import type { Bbox, GridPoint, PointsResponse } from "./api";
 import { fetchPoints } from "./api";
 import type { Place } from "./places";
 import { countries, countryPlaces, statePlaces, cityPlaces } from "./places";
 
-// Camera altitude thresholds → API zoom level (grid granularity).
-const ZOOM_STEPS: Array<[number, number]> = [
-  [2.0, 0],
-  [1.2, 1],
-  [0.7, 2],
-  [0.4, 3],
-  [0.2, 4],
-  [0, 5],
-];
-
-function zoomForAltitude(altitude: number): number {
-  for (const [minAlt, zoom] of ZOOM_STEPS) {
-    if (altitude >= minAlt) return zoom;
-  }
-  return 5;
-}
-
-// Label visibility per zoom: how many countries, and the viewport half-span
-// (degrees) inside which state/city labels are shown.
-const COUNTRY_COUNT_BY_ZOOM = [30, 60, 999, 999, 999, 999];
-const LABEL_SPAN_BY_ZOOM = [0, 0, 14, 8, 4.5, 3];
-const MAX_STATE_LABELS = 35;
-const MAX_CITY_LABELS = 35;
-
-function labelSize(place: Place, zoom: number): number {
-  // Text shrinks as the camera nears so labels never dominate the view.
-  const shrink = 1 / (1 + zoom * 0.55);
-  if (place.tier === "country")
-    return (place.areaRank < 15 ? 1.0 : place.areaRank < 60 ? 0.7 : 0.5) * shrink;
-  if (place.tier === "state") return 0.8 * shrink;
-  return (place.pop >= 2_000_000 ? 0.85 : 0.6) * shrink;
-}
-
-function labelColor(place: Place): string {
-  if (place.tier === "country") return "rgba(150, 160, 195, 0.85)";
-  if (place.tier === "state") return "rgba(120, 132, 168, 0.7)";
-  return "rgba(200, 210, 240, 0.9)";
-}
-
-// globe.gl frames the scene by VERTICAL field of view, so a portrait phone
-// crops the globe's left and right edges. Pull the camera back far enough that
-// whichever axis is tighter still fits. Never closer than the desktop default.
-const DEFAULT_ALTITUDE = 2.5;
-const CAMERA_FOV_DEG = 50; // three.js perspective camera default used by globe.gl
-
-function fitAltitude(width: number, height: number): number {
-  if (!width || !height) return DEFAULT_ALTITUDE;
-  const halfV = (CAMERA_FOV_DEG / 2) * (Math.PI / 180);
-  const halfH = Math.atan(Math.tan(halfV) * (width / height));
-  const limiting = Math.min(halfV, halfH) * 0.97; // snug fit, small edge margin
-  // Globe radius is 1 unit here; altitude is expressed in radii above surface.
-  return Math.max(DEFAULT_ALTITUDE, 1 / Math.sin(limiting) - 1);
-}
-
-// ---------------------------------------------------------------------------
-// Density rendering. Following Snap Map's approach, the encoding changes with
-// zoom rather than one style being scaled up and down: a continuous heatmap
-// for the global glance, hex bins once close enough to read and tap.
-// Hex bins matter because every cell is the SAME size, so area no longer
-// conflates "how big is our grid cell" with "how many events".
-// ---------------------------------------------------------------------------
-
-/** Highest zoom that still renders the heatmap; above this, hex bins. */
-const HEATMAP_MAX_ZOOM = 1;
-
-/** H3 resolution per zoom level (higher = smaller hexes). */
-const HEX_RES_BY_ZOOM = [1, 1, 2, 3, 4, 5];
-
-/**
- * The API grid is sized for the display zoom, which is too coarse to feed a
- * smooth heatmap or a meaningful hex binning. Request finer cells so both
- * layers have real structure to aggregate.
- */
-const DETAIL_BUMP = 2;
-const MAX_API_ZOOM = 5;
+import {
+  COUNTRY_COUNT_BY_ZOOM,
+  DETAIL_BUMP,
+  HEATMAP_MAX_ZOOM,
+  HEX_RES_BY_ZOOM,
+  LABEL_SPAN_BY_ZOOM,
+  MAX_API_ZOOM,
+  MAX_CITY_LABELS,
+  MAX_STATE_LABELS,
+  extent,
+  fitAltitude,
+  isBoundsStale,
+  inSpan,
+  labelColor,
+  labelSize,
+  rampColor,
+  thinLabels,
+  viewportBounds,
+  zoomForAltitude,
+} from "./globe-helpers";
 
 interface HexBin {
   points: GridPoint[];
   sumWeight: number;
-}
-
-// Warm-only ramp: red through orange to near-white. Against the cool navy
-// globe every warm pixel reads as "activity", and transparency (not a dark
-// colour) carries the low end so quiet regions simply fade out.
-const RAMP: Array<[number, [number, number, number]]> = [
-  [0.0, [255, 80, 40]],
-  [0.4, [255, 120, 45]],
-  [0.75, [255, 180, 60]],
-  [1.0, [255, 245, 190]],
-];
-
-function rampColor(t: number, alpha: number): string {
-  const x = Math.max(0, Math.min(1, t));
-  let lo = RAMP[0];
-  let hi = RAMP[RAMP.length - 1];
-  for (let i = 0; i < RAMP.length - 1; i++) {
-    if (x >= RAMP[i][0] && x <= RAMP[i + 1][0]) {
-      lo = RAMP[i];
-      hi = RAMP[i + 1];
-      break;
-    }
-  }
-  const span = hi[0] - lo[0] || 1;
-  const f = (x - lo[0]) / span;
-  const c = lo[1].map((v, i) => Math.round(v + (hi[1][i] - v) * f));
-  return `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${alpha})`;
-}
-
-function inSpan(place: Place, lat: number, lng: number, span: number): boolean {
-  if (Math.abs(place.lat - lat) > span) return false;
-  let dLng = Math.abs(place.lng - lng);
-  if (dLng > 180) dLng = 360 - dLng;
-  return dLng <= span;
-}
-
-// Greedy collision culling: labels arrive in priority order (countries, then
-// cities by population, then states); any label too close to one already kept
-// is dropped. Text is wider than tall, so longitude distance counts for less.
-function thinLabels(labels: Place[], minDist: number): Place[] {
-  const kept: Place[] = [];
-  for (const place of labels) {
-    const collides = kept.some((k) => {
-      const dLat = Math.abs(k.lat - place.lat);
-      let dLng = Math.abs(k.lng - place.lng);
-      if (dLng > 180) dLng = 360 - dLng;
-      dLng *= Math.cos((place.lat * Math.PI) / 180);
-      return Math.hypot(dLat / 0.55, dLng / 1.5) < minDist;
-    });
-    if (!collides) kept.push(place);
-  }
-  return kept;
 }
 
 export interface GlobeApi {
@@ -221,21 +114,21 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
         if (!h.points?.length) return;
         // Derive the tapped area from the bin's own points so the news panel
         // queries exactly the region the user touched.
-        const lats = h.points.map((p) => p.lat);
-        const lons = h.points.map((p) => p.lon);
+        // Iterative min/max: Math.max(...array) passes one argument per point
+        // and overflows the call stack once a bin holds enough of them.
+        const lat = extent(h.points, (p) => p.lat);
+        const lon = extent(h.points, (p) => p.lon);
         const pad = cellSizeRef.current;
-        const latSpan = Math.max(...lats) - Math.min(...lats) + pad;
-        const lonSpan = Math.max(...lons) - Math.min(...lons) + pad;
         const top = h.points.reduce((a, b) => (b.count > a.count ? b : a), h.points[0]);
         onSelectRef.current(
           {
-            lat: (Math.max(...lats) + Math.min(...lats)) / 2,
-            lon: (Math.max(...lons) + Math.min(...lons)) / 2,
+            lat: (lat.max + lat.min) / 2,
+            lon: (lon.max + lon.min) / 2,
             count: h.sumWeight,
             mentions: h.points.reduce((s, p) => s + (p.mentions ?? 0), 0),
             top_location: top?.top_location ?? null,
           },
-          Math.max(latSpan, lonSpan)
+          Math.max(lat.max - lat.min + pad, lon.max - lon.min + pad)
         );
       });
 
@@ -246,18 +139,19 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       const zoom = zoomForAltitude(pov.altitude);
       if (zoom !== zoomRef.current) {
         zoomRef.current = zoom;
-        window.clearTimeout(debounceRef.current);
-        debounceRef.current = window.setTimeout(() => {
-          void load();
-          refreshLabels();
-        }, 300);
+        scheduleLoad(true);
+        window.clearTimeout(labelDebounceRef.current);
+        labelDebounceRef.current = window.setTimeout(refreshLabels, 300);
         return;
       }
-      // Same zoom, but panning far enough should re-filter region labels.
-      // Debounced so sprite rebuilds only happen once the camera settles.
+      // Same zoom, but panning far enough should re-filter region labels and,
+      // once the camera leaves the box we fetched, pull fresh points.
       if (LABEL_SPAN_BY_ZOOM[zoom] > 0 && labelKey() !== labelKeyRef.current) {
         window.clearTimeout(labelDebounceRef.current);
         labelDebounceRef.current = window.setTimeout(refreshLabels, 350);
+      }
+      if (isBoundsStale(pov.lat, pov.lng, zoom, fetchedBboxRef.current)) {
+        scheduleLoad(false);
       }
     }, 250);
 
@@ -362,13 +256,59 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
     globe.labelsData(labels);
   }
 
+  // Monotonic token: only the newest load() may publish its result. Without
+  // this a slow response for a previous zoom can land after a newer one and
+  // render the wrong density layer (hex bins while the camera sits at global
+  // zoom, or vice versa) until the next zoom change.
+  const loadSeqRef = useRef(0);
+  const fetchedBboxRef = useRef<Bbox | null>(null);
+  const loadPendingRef = useRef(false);
+
+  /** Bounding box for the current camera, or null to fetch worldwide. */
+  function viewportBbox(zoom: number): Bbox | null {
+    const globe = globeRef.current;
+    if (!globe) return null;
+    const pov = globe.pointOfView();
+    return viewportBounds(pov.lat, pov.lng, zoom);
+  }
+
+  /**
+   * Queue a data load.
+   *
+   * `reset` restarts the debounce, which is what rapid zooming wants so the
+   * intermediate levels coalesce into one fetch. The pan check must NOT reset:
+   * it stays true until a load actually completes, so resetting there cancelled
+   * the queued load on every poll tick and starved it forever.
+   */
+  function scheduleLoad(reset: boolean) {
+    if (loadPendingRef.current && !reset) return;
+    window.clearTimeout(debounceRef.current);
+    loadPendingRef.current = true;
+    debounceRef.current = window.setTimeout(() => {
+      loadPendingRef.current = false;
+      void load();
+    }, 300);
+  }
+
   async function load() {
     const zoom = zoomRef.current;
     const detail = Math.min(zoom + DETAIL_BUMP, MAX_API_ZOOM);
-    const res: PointsResponse = await fetchPoints(detail, daysRef.current);
+    const bbox = viewportBbox(zoom);
+    const seq = ++loadSeqRef.current;
+
+    let res: PointsResponse;
+    try {
+      res = await fetchPoints(detail, daysRef.current, bbox ?? undefined);
+    } catch {
+      return; // transient network failure; the next camera change retries
+    }
+
     const globe = globeRef.current;
-    if (!globe) return;
+    // Drop the result if the component unmounted or a newer load has started.
+    if (!globe || seq !== loadSeqRef.current) return;
+
     cellSizeRef.current = res.cell_size;
+    fetchedBboxRef.current = bbox;
 
     if (zoom <= HEATMAP_MAX_ZOOM) {
       // Heatmap owns the view; clear hexes so the two never overlap.
@@ -386,7 +326,10 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
         const idx = latLngToCell(p.lat, p.lon, resolution);
         bins.set(idx, (bins.get(idx) ?? 0) + p.count);
       }
-      const maxBin = Math.max(1, ...bins.values());
+      // Reduce rather than Math.max(...spread): the spread form passes one
+      // argument per bin and overflows the call stack on large datasets.
+      let maxBin = 1;
+      for (const weight of bins.values()) if (weight > maxBin) maxBin = weight;
       const norm = (w: number) => Math.log1p(Math.max(0, w)) / Math.log1p(maxBin);
 
       globe

@@ -1,5 +1,4 @@
-import { useRef, useState } from "react";
-import Globe from "./Globe";
+import { Suspense, lazy, useRef, useState } from "react";
 import type { GlobeApi } from "./Globe";
 import EventPanel from "./EventPanel";
 import SearchBar from "./SearchBar";
@@ -7,6 +6,11 @@ import TrendingPanel from "./TrendingPanel";
 import type { ProtestEvent, Selection } from "./api";
 import type { Place } from "./places";
 import "./App.css";
+
+// three.js + globe.gl are ~2.5 MB of the bundle. Loading them in a separate
+// chunk lets the shell (search, filters, trending) paint immediately instead of
+// holding first paint behind the 3D engine on a slow connection.
+const Globe = lazy(() => import("./Globe"));
 
 const DATE_RANGES = [
   { label: "24h", days: 1 },
@@ -71,19 +75,21 @@ export default function App() {
         </nav>
       </header>
 
-      <Globe
-        days={days}
-        apiRef={globeApi}
-        onSelect={(point, cellSize) =>
-          setSelection({
-            lat: point.lat,
-            lon: point.lon,
-            name: point.top_location,
-            count: point.count,
-            cellSize,
-          })
-        }
-      />
+      <Suspense fallback={<div className="globe-loading">Loading globe…</div>}>
+        <Globe
+          days={days}
+          apiRef={globeApi}
+          onSelect={(point, cellSize) =>
+            setSelection({
+              lat: point.lat,
+              lon: point.lon,
+              name: point.top_location,
+              count: point.count,
+              cellSize,
+            })
+          }
+        />
+      </Suspense>
 
       <button
         className="trending-toggle"

@@ -47,6 +47,7 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
         .then((page) => {
           setEvents((prev) => (offset === 0 ? page.events : [...prev, ...page.events]));
           setTotal(page.total);
+          setError(null); // a later page succeeding clears an earlier failure
           setHasMore(page.events.length === PAGE_SIZE);
           setLoading(false);
         })
@@ -148,9 +149,13 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
           </li>
         ))}
         {!loading && !error && events.length === 0 && (
-          <p className="muted">No events in this area.</p>
+          <li className="list-status muted">No events in this area.</li>
         )}
-        {loading && <p className="muted list-status">Loading…</p>}
+        {loading && (
+          <li className="list-status muted" aria-live="polite">
+            Loading…
+          </li>
+        )}
         <li ref={sentinelRef} className="sentinel" aria-hidden="true" />
       </ul>
     </aside>

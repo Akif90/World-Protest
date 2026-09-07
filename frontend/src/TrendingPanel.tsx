@@ -16,12 +16,12 @@ export default function TrendingPanel({ days, onSelect, open }: TrendingPanelPro
 
   useEffect(() => {
     const ctrl = new AbortController();
-    fetchTrending(days)
+    fetchTrending(days, 3, ctrl.signal)
       .then((list) => {
         if (!ctrl.signal.aborted) setTrending(list);
       })
       .catch(() => {});
-    fetchPopular(days)
+    fetchPopular(days, 5, ctrl.signal)
       .then((list) => {
         if (!ctrl.signal.aborted) setMostRead(list);
       })

@@ -57,31 +57,78 @@ async function get<T>(
   return res.json();
 }
 
-export function fetchPoints(zoom: number, days: number): Promise<PointsResponse> {
-  return get("/api/points", { zoom, days });
+export interface Bbox {
+  minLat: number;
+  maxLat: number;
+  minLon: number;
+  maxLon: number;
 }
 
-export async function fetchTrending(days: number, limit = 3): Promise<ProtestEvent[]> {
-  const page: EventsPage = await get("/api/events", {
-    min_lat: -90,
-    max_lat: 90,
-    min_lon: -180,
-    max_lon: 180,
-    days,
-    limit,
-  });
+export function fetchPoints(
+  zoom: number,
+  days: number,
+  bbox?: Bbox,
+  signal?: AbortSignal
+): Promise<PointsResponse> {
+  // Without a bbox the API returns every populated cell on Earth, which at the
+  // finest grid is thousands of rows for a viewport showing one country.
+  const params: Record<string, string | number> = { zoom, days };
+  if (bbox) {
+    params.min_lat = bbox.minLat;
+    params.max_lat = bbox.maxLat;
+    params.min_lon = bbox.minLon;
+    params.max_lon = bbox.maxLon;
+  }
+  return get("/api/points", params, signal);
+}
+
+export async function fetchTrending(
+  days: number,
+  limit = 3,
+  signal?: AbortSignal
+): Promise<ProtestEvent[]> {
+  const page: EventsPage = await get(
+    "/api/events",
+    { min_lat: -90, max_lat: 90, min_lon: -180, max_lon: 180, days, limit },
+    signal
+  );
   return page.events;
 }
 
-export function fetchPopular(days: number, limit = 5): Promise<ProtestEvent[]> {
-  return get("/api/popular", { days, limit });
+export function fetchPopular(
+  days: number,
+  limit = 5,
+  signal?: AbortSignal
+): Promise<ProtestEvent[]> {
+  return get("/api/popular", { days, limit }, signal);
 }
 
-/** Fire-and-forget: count that the user opened this event's article. */
+/**
+ * Opaque per-browser id so the server can collapse repeat opens by one reader
+ * without identifying anyone. Persisted so the same browser keeps one id.
+ */
+function viewerId(): string {
+  const KEY = "wpg:viewer";
+  try {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  } catch {
+    // Private mode or blocked storage: fall back to an ephemeral id.
+    return "anonymous";
+  }
+}
+
+/** Fire-and-forget: count that the reader opened this event's article. */
 export function reportOpen(eventId: number): void {
   fetch(`${API_BASE}/api/events/${eventId}/open`, {
     method: "POST",
     keepalive: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ viewer_id: viewerId() }),
   }).catch(() => {});
 }
 

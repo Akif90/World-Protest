@@ -4,11 +4,13 @@ import csv
 import io
 import logging
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy.dialects.postgresql import insert
 
+from app.config import BACKFILL_WORKERS, INGEST_CHUNK_ROWS
 from app.db import Event, SessionLocal, init_db
 
 log = logging.getLogger(__name__)
@@ -38,7 +40,13 @@ def _parse_rows(raw: bytes) -> list[dict]:
     """Parse a GDELT export CSV (tab-separated) into event dicts, protest rows only."""
     text = raw.decode("utf-8", errors="replace")
     events: list[dict] = []
-    for row in csv.reader(io.StringIO(text), delimiter="\t"):
+    # QUOTE_NONE is essential: GDELT exports are raw unquoted TSV, so without it
+    # a field beginning with a double quote makes csv treat it as a quoted field
+    # and swallow tab delimiters, shifting every later column. Rows then either
+    # fail the column-count guard below and vanish, or worse, get their
+    # coordinates read out of the wrong column and land somewhere random.
+    reader = csv.reader(io.StringIO(text), delimiter="\t", quoting=csv.QUOTE_NONE)
+    for row in reader:
         if len(row) < EXPECTED_COLUMNS:
             continue
         if row[COL_EVENT_ROOT_CODE] != PROTEST_ROOT_CODE:
@@ -71,21 +79,31 @@ def _parse_rows(raw: bytes) -> list[dict]:
 def _upsert(events: list[dict]) -> int:
     if not events:
         return 0
-    # GDELT re-publishes events with updated mention counts; last write wins.
-    stmt = insert(Event).values(events)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[Event.global_event_id],
-        set_={
-            "num_mentions": stmt.excluded.num_mentions,
-            "avg_tone": stmt.excluded.avg_tone,
-            "source_url": stmt.excluded.source_url,
-        },
-    )
+    # One export can legitimately repeat a GlobalEventID; ON CONFLICT DO UPDATE
+    # cannot touch the same row twice in a single statement, so collapse first.
+    unique = {e["global_event_id"]: e for e in events}
+    rows = list(unique.values())
+
     with SessionLocal() as session:
-        session.execute(stmt)
+        # Chunked because Postgres caps a statement at 65535 bind parameters;
+        # one statement for the whole batch fails once a cycle brings in more
+        # than ~5,400 rows (65535 / columns-per-row).
+        for start in range(0, len(rows), INGEST_CHUNK_ROWS):
+            chunk = rows[start : start + INGEST_CHUNK_ROWS]
+            stmt = insert(Event).values(chunk)
+            # GDELT re-publishes events with updated mention counts.
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[Event.global_event_id],
+                set_={
+                    "num_mentions": stmt.excluded.num_mentions,
+                    "avg_tone": stmt.excluded.avg_tone,
+                    "source_url": stmt.excluded.source_url,
+                },
+            )
+            session.execute(stmt)
         session.commit()
     # rowcount is unreliable for batched ON CONFLICT inserts; report input size.
-    return len(events)
+    return len(rows)
 
 
 def ingest_export_url(url: str, client: httpx.Client) -> int:
@@ -95,7 +113,11 @@ def ingest_export_url(url: str, client: httpx.Client) -> int:
         return 0  # GDELT occasionally skips a 15-min cycle
     resp.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        raw = zf.read(zf.namelist()[0])
+        names = zf.namelist()
+        if not names:
+            log.warning("empty archive at %s", url)
+            return 0
+        raw = zf.read(names[0])
     events = _parse_rows(raw)
     count = _upsert(events)
     log.info("ingested %s: %d protest events", url.rsplit("/", 1)[-1], count)
@@ -133,14 +155,37 @@ def backfill(days: int) -> int:
     now = datetime.now(timezone.utc)
     ts = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
     start = ts - timedelta(days=days)
+
+    urls = []
+    while ts > start:
+        urls.append(f"{GDELT_BASE}/{ts.strftime('%Y%m%d%H%M%S')}.export.CSV.zip")
+        ts -= timedelta(minutes=15)
+
+    # 96 archives per day, so a week is ~670 requests. Downloading and parsing
+    # them concurrently turns a long serial crawl into a short one; the parse is
+    # pure and the database write stays on this thread.
     total = 0
     with httpx.Client(timeout=120, follow_redirects=True) as client:
-        while ts > start:
-            url = f"{GDELT_BASE}/{ts.strftime('%Y%m%d%H%M%S')}.export.CSV.zip"
-            try:
-                total += ingest_export_url(url, client)
-            except (httpx.HTTPError, zipfile.BadZipFile) as exc:
-                log.warning("skipping %s: %s", url, exc)
-            ts -= timedelta(minutes=15)
+        with ThreadPoolExecutor(max_workers=BACKFILL_WORKERS) as pool:
+            for url, events in zip(urls, pool.map(lambda u: _download(u, client), urls)):
+                if events:
+                    total += _upsert(events)
+                    log.info("ingested %s: %d protest events", url.rsplit("/", 1)[-1], len(events))
     log.info("backfill complete: %d rows upserted", total)
     return total
+
+
+def _download(url: str, client: httpx.Client) -> list[dict]:
+    """Fetch and parse one export, returning [] for any cycle we can't read."""
+    try:
+        resp = client.get(url)
+        if resp.status_code != 200:
+            return []
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            names = zf.namelist()
+            if not names:
+                return []
+            return _parse_rows(zf.read(names[0]))
+    except (httpx.HTTPError, zipfile.BadZipFile) as exc:
+        log.warning("skipping %s: %s", url, exc)
+        return []

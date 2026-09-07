@@ -4,6 +4,7 @@ import logging
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from app.config import ENRICH_BATCH_SIZE
 from app.ingest.enrich import enrich_batch
 from app.ingest.gdelt import ingest_latest
 
@@ -12,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 def ingest_and_enrich() -> None:
     ingest_latest()
-    enrich_batch(limit=50)
+    enrich_batch(limit=ENRICH_BATCH_SIZE)
 
 
 def main() -> None:

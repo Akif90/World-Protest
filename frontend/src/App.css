@@ -134,6 +134,8 @@ body,
 
 .list-status {
   padding: 10px 0;
+  list-style: none;
+  border: none;
 }
 
 .search {
@@ -300,6 +302,14 @@ body,
 
 .event-panel a:hover {
   text-decoration: underline;
+}
+
+.globe-loading {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: #7d86a8;
+  font-size: 13px;
 }
 
 .muted {
