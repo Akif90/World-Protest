@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+const API_BASE = "";
 
 export interface GridPoint {
   lat: number;
@@ -18,7 +18,6 @@ export interface Selection {
   lat: number;
   lon: number;
   name: string | null;
-  count?: number;
   cellSize: number;
 }
 
@@ -129,7 +128,7 @@ export function reportOpen(eventId: number): void {
     keepalive: true,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ viewer_id: viewerId() }),
-  }).catch(() => {});
+  }).catch(() => { });
 }
 
 export function fetchEvents(

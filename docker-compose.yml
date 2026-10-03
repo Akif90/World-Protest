@@ -1,20 +1,51 @@
 services:
   db:
     image: postgres:16
-    container_name: wpa-postgres
     environment:
       POSTGRES_USER: wpa
       POSTGRES_PASSWORD: wpa
       POSTGRES_DB: wpa
-    ports:
-      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wpa"]
+      test: [ "CMD-SHELL", "pg_isready -U wpa" ]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://wpa:wpa@db:5432/wpa
+      ALLOWED_ORIGINS: http://localhost:80
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: [ "python", "-m", "app.ingest.scheduler" ]
+    environment:
+      DATABASE_URL: postgresql+psycopg://wpa:wpa@db:5432/wpa
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    restart: unless-stopped
 
 volumes:
   pgdata:
