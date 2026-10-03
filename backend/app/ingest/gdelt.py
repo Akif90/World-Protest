@@ -8,10 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from app.config import BACKFILL_WORKERS, INGEST_CHUNK_ROWS
-from app.db import Event, SessionLocal, init_db
+from app.db import Event, IngestArchive, SessionLocal, init_db, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -109,14 +110,11 @@ def _upsert(events: list[dict]) -> int:
 def ingest_export_url(url: str, client: httpx.Client) -> int:
     """Download one .export.CSV.zip and upsert its protest events. Returns row count."""
     resp = client.get(url)
-    if resp.status_code == 404:
-        return 0  # GDELT occasionally skips a 15-min cycle
     resp.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         names = zf.namelist()
         if not names:
-            log.warning("empty archive at %s", url)
-            return 0
+            raise ValueError(f"empty archive at {url}")
         raw = zf.read(names[0])
     events = _parse_rows(raw)
     count = _upsert(events)
@@ -125,7 +123,11 @@ def ingest_export_url(url: str, client: httpx.Client) -> int:
 
 
 def ingest_latest() -> int:
-    """Ingest the most recent 15-minute export advertised by lastupdate.txt."""
+    """Discover exports since the last run and retry unfinished archives.
+
+    First run starts at the advertised export; historical imports remain explicit.
+    Upserts commit before marking complete, so interrupted work can safely replay.
+    """
     init_db()
     with httpx.Client(timeout=120, follow_redirects=True) as client:
         lastupdate = client.get(LASTUPDATE_URL)
@@ -141,7 +143,42 @@ def ingest_latest() -> int:
         if export_url is None:
             log.warning("no export file listed in lastupdate.txt")
             return 0
-        return ingest_export_url(export_url, client)
+        latest = datetime.strptime(export_url.rsplit("/", 1)[-1].split(".")[0],
+                                   "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        with SessionLocal() as session:
+            newest = session.scalar(select(func.max(IngestArchive.timestamp)))
+            timestamp = newest + timedelta(minutes=15) if newest else latest
+            while timestamp <= latest:
+                session.execute(insert(IngestArchive).values(timestamp=timestamp)
+                                .on_conflict_do_nothing())
+                timestamp += timedelta(minutes=15)
+            session.commit()
+            pending = session.scalars(
+                select(IngestArchive.timestamp)
+                .where(IngestArchive.completed.is_(False), IngestArchive.next_attempt <= utcnow())
+                .order_by(IngestArchive.timestamp.desc()).limit(96)
+            ).all()
+        total = 0
+        for timestamp in pending:
+            url = f"{GDELT_BASE}/{timestamp.strftime('%Y%m%d%H%M%S')}.export.CSV.zip"
+            try:
+                total += ingest_export_url(url, client)
+            except (httpx.HTTPError, zipfile.BadZipFile, ValueError) as exc:
+                # Missing publication slots must not block newer data. Keep them
+                # in the ledger, but retry 404s less often than transient failures.
+                missing = isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404
+                delay = timedelta(days=1) if missing else timedelta(minutes=15)
+                with SessionLocal() as session:
+                    archive = session.get(IngestArchive, timestamp)
+                    archive.next_attempt = utcnow() + delay
+                    session.commit()
+                log.warning("will retry %s: %s", url, exc)
+            else:
+                with SessionLocal() as session:
+                    archive = session.get(IngestArchive, timestamp)
+                    archive.completed = True
+                    session.commit()
+        return total
 
 
 def backfill(days: int) -> int:

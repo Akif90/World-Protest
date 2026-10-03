@@ -1,7 +1,8 @@
+import hashlib
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, func, select, text
 from sqlalchemy.orm import aliased
 
 from app.config import OPEN_DEDUP_WINDOW_HOURS
@@ -154,14 +155,25 @@ def record_open(event_id: int, viewer_id: str = Body(embed=True, default="")):
     """
     viewer = (viewer_id or "").strip()[:64]
     with SessionLocal() as session:
-        if session.get(Event, event_id) is None:
+        event = session.get(Event, event_id)
+        if event is None:
             raise HTTPException(status_code=404, detail="event not found")
         if viewer:
+            # Serialize this viewer's opens across all stories. A viewer-level
+            # lock also remains stable when enrichment changes a story's title.
+            lock_id = int.from_bytes(
+                hashlib.sha256(viewer.encode()).digest()[:8], "big", signed=True
+            )
+            session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_id})
+            story_key = session.scalar(
+                select(_story_key()).where(Event.global_event_id == event_id)
+            )
             cutoff = utcnow() - timedelta(hours=OPEN_DEDUP_WINDOW_HOURS)
             already = session.execute(
                 select(EventOpen.id)
+                .join(Event, Event.global_event_id == EventOpen.event_id)
                 .where(
-                    EventOpen.event_id == event_id,
+                    _story_key() == story_key,
                     EventOpen.viewer_id == viewer,
                     EventOpen.opened_at >= cutoff,
                 )

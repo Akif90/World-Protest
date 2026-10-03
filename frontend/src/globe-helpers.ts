@@ -192,17 +192,18 @@ export function viewportBounds(
  * Whether the camera has drifted far enough that `fetched` no longer covers it.
  *
  * A margin keeps a refetch from waiting until the user has already panned into
- * empty space. Worldwide fetches (span 0) are never stale.
+ * empty space. Undefined means unloaded; null means worldwide coverage.
  */
 export function isBoundsStale(
   lat: number,
   lng: number,
   zoom: number,
-  fetched: Bounds | null
+  fetched: Bounds | null | undefined
 ): boolean {
   const span = FETCH_SPAN_BY_ZOOM[zoom] ?? 0;
   if (span === 0) return false;
-  if (!fetched) return true;
+  if (fetched === undefined) return true;
+  if (fetched === null) return false;
   const margin = span * 0.4;
   return (
     lat - margin < fetched.minLat ||

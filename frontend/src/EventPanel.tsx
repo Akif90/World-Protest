@@ -15,7 +15,11 @@ interface EventPanelProps {
 
 export default function EventPanel({ selection, days, onClose }: EventPanelProps) {
   const [events, setEvents] = useState<ProtestEvent[]>([]);
-  const [total, setTotal] = useState<number | null>(null);
+  const [total, setTotal] = useState<{
+    selection: Selection;
+    days: number;
+    value: number;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,8 +49,9 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
         ctrl.signal
       )
         .then((page) => {
+          if (ctrl.signal.aborted) return;
           setEvents((prev) => (offset === 0 ? page.events : [...prev, ...page.events]));
-          setTotal(page.total);
+          setTotal({ selection, days, value: page.total });
           setError(null); // a later page succeeding clears an earlier failure
           setHasMore(page.events.length === PAGE_SIZE);
           setLoading(false);
@@ -77,7 +82,7 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
   useEffect(() => {
     const list = listRef.current;
     const sentinel = sentinelRef.current;
-    if (!list || !sentinel || !hasMore || loading) return;
+    if (!list || !sentinel || !hasMore || loading || error) return;
 
     let triggered = false;
     const maybeLoadMore = () => {
@@ -101,7 +106,7 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
       observer.disconnect();
       list.removeEventListener("scroll", maybeLoadMore);
     };
-  }, [events.length, hasMore, loading, loadPage]);
+  }, [events.length, hasMore, loading, error, loadPage]);
 
   if (!selection) return null;
 
@@ -111,9 +116,9 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
         <div>
           <h2>{selection.name ?? "Selected region"}</h2>
           <p className="muted">
-            {/* Live total from the API so it tracks the active date filter. */}
-            {(total ?? selection.count) != null
-              ? `${total ?? selection.count} event${(total ?? selection.count) === 1 ? "" : "s"} · `
+            {/* Only a total fetched for this selection and range is current. */}
+            {total?.selection === selection && total.days === days
+              ? `${total.value} event${total.value === 1 ? "" : "s"} · `
               : ""}
             last {days} day{days === 1 ? "" : "s"}
           </p>
@@ -123,7 +128,12 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
         </button>
       </header>
 
-      {error && <p className="muted">Failed to load events: {error}</p>}
+      {error && (
+        <div role="alert">
+          <p className="muted">Failed to load events: {error}</p>
+          <button disabled={loading} onClick={() => loadPage(events.length)}>Retry</button>
+        </div>
+      )}
 
       <ul ref={listRef}>
         {events.map((e, i) => (

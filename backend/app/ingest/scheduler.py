@@ -9,6 +9,7 @@ from app.ingest.enrich import enrich_batch
 from app.ingest.gdelt import ingest_latest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def ingest_and_enrich() -> None:

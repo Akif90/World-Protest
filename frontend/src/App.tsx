@@ -84,7 +84,6 @@ export default function App() {
               lat: point.lat,
               lon: point.lon,
               name: point.top_location,
-              count: point.count,
               cellSize,
             })
           }

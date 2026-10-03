@@ -32,6 +32,10 @@ interface HexBin {
   sumWeight: number;
 }
 
+interface CurrentHexBin extends HexBin {
+  h3Idx: string;
+}
+
 export interface GlobeApi {
   flyTo: (lat: number, lng: number, altitude: number) => void;
 }
@@ -47,10 +51,12 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
   const globeRef = useRef<InstanceType<typeof GlobeGL> | null>(null);
   const zoomRef = useRef(0);
   const daysRef = useRef(days);
+  const currentHexBinsRef = useRef(new Map<string, CurrentHexBin>());
   const cellSizeRef = useRef(10);
   const debounceRef = useRef<number | undefined>(undefined);
   const labelDebounceRef = useRef<number | undefined>(undefined);
   const labelKeyRef = useRef("");
+  const scheduledLabelKeyRef = useRef("");
 
   useEffect(() => {
     daysRef.current = days;
@@ -102,7 +108,9 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       .hexMargin(0.18)
       .hexTransitionDuration(300)
       .hexLabel((d) => {
-        const h = d as HexBin;
+        const id = (d as unknown as CurrentHexBin).h3Idx;
+        const h = currentHexBinsRef.current.get(id);
+        if (!h) return "";
         const top = h.points.reduce((a, b) => (b.count > a.count ? b : a), h.points[0]);
         return `<div style="font: 12px sans-serif; background: #111a; padding: 6px 8px; border-radius: 6px;">
           <b>${top?.top_location ?? "Unknown location"}</b><br/>
@@ -110,8 +118,9 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
         </div>`;
       })
       .onHexClick((d) => {
-        const h = d as HexBin;
-        if (!h.points?.length) return;
+        const id = (d as unknown as CurrentHexBin).h3Idx;
+        const h = currentHexBinsRef.current.get(id);
+        if (!h?.points.length) return;
         // Derive the tapped area from the bin's own points so the news panel
         // queries exactly the region the user touched.
         // Iterative min/max: Math.max(...array) passes one argument per point
@@ -140,13 +149,15 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       if (zoom !== zoomRef.current) {
         zoomRef.current = zoom;
         scheduleLoad(true);
+        scheduledLabelKeyRef.current = labelKey();
         window.clearTimeout(labelDebounceRef.current);
         labelDebounceRef.current = window.setTimeout(refreshLabels, 300);
         return;
       }
       // Same zoom, but panning far enough should re-filter region labels and,
       // once the camera leaves the box we fetched, pull fresh points.
-      if (LABEL_SPAN_BY_ZOOM[zoom] > 0 && labelKey() !== labelKeyRef.current) {
+      if (LABEL_SPAN_BY_ZOOM[zoom] > 0 && labelKey() !== scheduledLabelKeyRef.current) {
+        scheduledLabelKeyRef.current = labelKey();
         window.clearTimeout(labelDebounceRef.current);
         labelDebounceRef.current = window.setTimeout(refreshLabels, 350);
       }
@@ -197,6 +208,14 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       window.clearTimeout(debounceRef.current);
       window.clearTimeout(labelDebounceRef.current);
       if (apiRef) apiRef.current = null;
+      // Invalidate whichever request is active at cleanup, not the initial one.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      loadSeqRef.current++;
+      activeLoadRef.current?.abort();
+      activeLoadRef.current = null;
+      loadPendingRef.current = false;
+      labelKeyRef.current = "";
+      scheduledLabelKeyRef.current = "";
       globe._destructor();
       globeRef.current = null;
     };
@@ -261,8 +280,9 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
   // render the wrong density layer (hex bins while the camera sits at global
   // zoom, or vice versa) until the next zoom change.
   const loadSeqRef = useRef(0);
-  const fetchedBboxRef = useRef<Bbox | null>(null);
+  const fetchedBboxRef = useRef<Bbox | null | undefined>(undefined);
   const loadPendingRef = useRef(false);
+  const activeLoadRef = useRef<AbortController | null>(null);
 
   /** Bounding box for the current camera, or null to fetch worldwide. */
   function viewportBbox(zoom: number): Bbox | null {
@@ -281,7 +301,7 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
    * the queued load on every poll tick and starved it forever.
    */
   function scheduleLoad(reset: boolean) {
-    if (loadPendingRef.current && !reset) return;
+    if ((loadPendingRef.current || activeLoadRef.current) && !reset) return;
     window.clearTimeout(debounceRef.current);
     loadPendingRef.current = true;
     debounceRef.current = window.setTimeout(() => {
@@ -295,12 +315,17 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
     const detail = Math.min(zoom + DETAIL_BUMP, MAX_API_ZOOM);
     const bbox = viewportBbox(zoom);
     const seq = ++loadSeqRef.current;
+    activeLoadRef.current?.abort();
+    const controller = new AbortController();
+    activeLoadRef.current = controller;
 
     let res: PointsResponse;
     try {
-      res = await fetchPoints(detail, daysRef.current, bbox ?? undefined);
+      res = await fetchPoints(detail, daysRef.current, bbox ?? undefined, controller.signal);
     } catch {
       return; // transient network failure; the next camera change retries
+    } finally {
+      if (activeLoadRef.current === controller) activeLoadRef.current = null;
     }
 
     const globe = globeRef.current;
@@ -311,6 +336,7 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
     fetchedBboxRef.current = bbox;
 
     if (zoom <= HEATMAP_MAX_ZOOM) {
+      currentHexBinsRef.current.clear();
       // Heatmap owns the view; clear hexes so the two never overlap.
       globe.hexBinPointsData([]).heatmapsData([res.points]);
     } else {
@@ -321,15 +347,22 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       // median around 3 against a max near 170), so scale logarithmically --
       // linear or sqrt leaves almost every hex crushed at the bottom of the
       // ramp and the top of it never reached.
-      const bins = new Map<string, number>();
+      const bins = new Map<string, CurrentHexBin>();
       for (const p of res.points) {
         const idx = latLngToCell(p.lat, p.lon, resolution);
-        bins.set(idx, (bins.get(idx) ?? 0) + p.count);
+        let bin = bins.get(idx);
+        if (!bin) {
+          bin = { h3Idx: idx, points: [], sumWeight: 0 };
+          bins.set(idx, bin);
+        }
+        bin.points.push(p);
+        bin.sumWeight += p.count;
       }
+      currentHexBinsRef.current = bins;
       // Reduce rather than Math.max(...spread): the spread form passes one
       // argument per bin and overflows the call stack on large datasets.
       let maxBin = 1;
-      for (const weight of bins.values()) if (weight > maxBin) maxBin = weight;
+      for (const bin of bins.values()) if (bin.sumWeight > maxBin) maxBin = bin.sumWeight;
       const norm = (w: number) => Math.log1p(Math.max(0, w)) / Math.log1p(maxBin);
 
       globe
@@ -349,6 +382,9 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
 
   // Refetch when the date-range filter changes.
   useEffect(() => {
+    // Remove old hexes and their hover target while the new range loads.
+    currentHexBinsRef.current.clear();
+    globeRef.current?.hexBinPointsData([]).heatmapsData([]);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days]);

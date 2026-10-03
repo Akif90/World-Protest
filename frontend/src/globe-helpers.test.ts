@@ -149,12 +149,17 @@ describe("isBoundsStale", () => {
   });
 
   it("is stale when nothing has been fetched yet", () => {
-    expect(isBoundsStale(0, 0, 4, null)).toBe(true);
+    expect(isBoundsStale(0, 0, 4, undefined)).toBe(true);
   });
 
   it("is not stale while the camera sits well inside the fetched box", () => {
     const b = viewportBounds(28.6, 77.2, 4)!;
     expect(isBoundsStale(28.6, 77.2, 4, b)).toBe(false);
+  });
+
+  it("retains worldwide coverage at polar and antimeridian views", () => {
+    expect(isBoundsStale(84, 0, 4, viewportBounds(84, 0, 4))).toBe(false);
+    expect(isBoundsStale(0, 179, 4, viewportBounds(0, 179, 4))).toBe(false);
   });
 
   it("becomes stale after panning toward the edge", () => {

@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -56,6 +57,16 @@ class Event(Base):
     )
 
     __table_args__ = (Index("ix_events_date_lat_lon", "event_date", "lat", "lon"),)
+
+
+class IngestArchive(Base):
+    """Durable work ledger: failed exports remain eligible for retry."""
+
+    __tablename__ = "ingest_archives"
+
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    next_attempt: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class EventOpen(Base):
