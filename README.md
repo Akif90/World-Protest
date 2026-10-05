@@ -47,9 +47,21 @@ docker compose up --build
 ```
 
 Open <http://localhost>. The API is also available directly at
-<http://localhost:8000>, and PostgreSQL is exposed on port `5433` for local
-inspection. Frontend requests to `/api` are proxied to the backend over the
-private Compose network.
+<http://localhost:8000>. PostgreSQL is available only inside the Compose network.
+The browser calls the backend directly; Nginx serves the frontend files.
+Backend CORS permits the frontend origins `http://localhost` and
+`http://127.0.0.1`.
+
+For a different host, set the browser-accessible API URL and frontend origin
+before building, for example:
+
+```bash
+VITE_API_BASE=https://api.example.com ALLOWED_ORIGINS=https://app.example.com docker compose up --build
+```
+
+`VITE_API_BASE` is compiled into the frontend, so changing it requires a rebuild.
+Use an address the browser can reach; the Compose service name `backend` only
+resolves inside Docker. Both public endpoints should use HTTPS when deploying.
 
 Run the initial history import once after the services are healthy:
 

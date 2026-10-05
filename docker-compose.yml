@@ -19,7 +19,7 @@ services:
       dockerfile: Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://wpa:wpa@db:5432/wpa
-      ALLOWED_ORIGINS: http://localhost:80
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
     ports:
       - "8000:8000"
     depends_on:
@@ -43,6 +43,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8000}
     ports:
       - "80:80"
     restart: unless-stopped
