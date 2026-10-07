@@ -5,6 +5,7 @@ import type { Bbox, GridPoint, PointsResponse } from "./api";
 import { fetchPoints } from "./api";
 import type { Place } from "./places";
 import { countries, countryPlaces, statePlaces, cityPlaces } from "./places";
+import { declutterLabels, isLabelFacingCamera, labelTiers } from "./globe-labels";
 
 import {
   COUNTRY_COUNT_BY_ZOOM,
@@ -19,10 +20,7 @@ import {
   fitAltitude,
   isBoundsStale,
   inSpan,
-  labelColor,
-  labelSize,
   rampColor,
-  thinLabels,
   viewportBounds,
   zoomForAltitude,
 } from "./globe-helpers";
@@ -36,17 +34,24 @@ interface CurrentHexBin extends HexBin {
   h3Idx: string;
 }
 
+function motionDuration() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 800;
+}
+
 export interface GlobeApi {
   flyTo: (lat: number, lng: number, altitude: number) => void;
+  zoom: (factor: number) => void;
+  reset: () => void;
 }
 
 interface GlobeProps {
+  theme?: "light" | "dark";
   days: number;
   onSelect: (point: GridPoint, cellSize: number) => void;
   apiRef?: React.MutableRefObject<GlobeApi | null>;
 }
 
-export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
+export default function Globe({ days, onSelect, apiRef, theme = "light" }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const globeRef = useRef<InstanceType<typeof GlobeGL> | null>(null);
   const zoomRef = useRef(0);
@@ -57,6 +62,8 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
   const labelDebounceRef = useRef<number | undefined>(undefined);
   const labelKeyRef = useRef("");
   const scheduledLabelKeyRef = useRef("");
+  const labelElementsRef = useRef(new Map<Place, HTMLButtonElement>());
+  const visibleLabelsRef = useRef<Place[]>([]);
 
   useEffect(() => {
     daysRef.current = days;
@@ -64,30 +71,33 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
 
   useEffect(() => {
     if (!containerRef.current) return;
+    const labelElements = labelElementsRef.current;
 
     const globe = new GlobeGL(containerRef.current)
-      .backgroundColor("#04060f")
+      .backgroundColor("rgba(0,0,0,0)")
+      .globeImageUrl(`${import.meta.env.BASE_URL}earth.webp`)
       .showAtmosphere(true)
-      .atmosphereColor("#4a5a9a")
-      .atmosphereAltitude(0.12)
-      // Country shapes drawn as flat vector polygons on a plain sphere.
+      .atmosphereColor("#8ad0dd")
+      .atmosphereAltitude(0.075)
+      // The cached texture supplies land detail; vectors add quiet borders only.
       .polygonsData(countries.features)
-      .polygonCapColor(() => "#141c33")
+      .polygonCapColor(() => "rgba(0,0,0,0)")
       .polygonSideColor(() => "rgba(0,0,0,0)")
-      .polygonStrokeColor(() => "#2e3c63")
-      .polygonAltitude(0.004)
+      .polygonStrokeColor(() => "rgba(43,84,79,0.2)")
+      .polygonAltitude(0.001)
       .polygonsTransitionDuration(0)
-      // Place names: countries always, states/cities revealed with zoom.
-      .labelsData(countryPlaces.slice(0, COUNTRY_COUNT_BY_ZOOM[0]))
-      .labelLat((d) => (d as Place).lat)
-      .labelLng((d) => (d as Place).lng)
-      .labelText((d) => (d as Place).name)
-      .labelSize((d) => labelSize(d as Place, zoomRef.current))
-      .labelColor((d) => labelColor(d as Place))
-      .labelDotRadius((d) => ((d as Place).tier === "city" ? 0.06 : 0))
-      .labelAltitude(0.006)
-      .labelResolution(2)
-      .labelsTransitionDuration(0)
+      // Browser text stays crisp, horizontal, and the same pixel size at every
+      // altitude. Its separate layer cannot be depth-clipped by coverage meshes.
+      .htmlElementsData([])
+      .htmlLat((d) => (d as Place).lat)
+      .htmlLng((d) => (d as Place).lng)
+      .htmlAltitude(0.02)
+      .htmlTransitionDuration(0)
+      .htmlElement((d) => labelElement(d as Place))
+      .onGlobeClick(({ lat, lng }) => {
+        onSelectRef.current({ lat, lon: lng, count: 0, mentions: 0, top_location: null },
+          Math.max(cellSizeRef.current, zoomRef.current <= HEATMAP_MAX_ZOOM ? 3 : 0.6));
+      })
       // Density layer A: heatmap, shown when zoomed out. Flat (colour only) so
       // it never occludes the globe or the labels underneath.
       .heatmapPoints((d) => d as object[])
@@ -156,7 +166,7 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       }
       // Same zoom, but panning far enough should re-filter region labels and,
       // once the camera leaves the box we fetched, pull fresh points.
-      if (LABEL_SPAN_BY_ZOOM[zoom] > 0 && labelKey() !== scheduledLabelKeyRef.current) {
+      if (labelKey() !== scheduledLabelKeyRef.current) {
         scheduledLabelKeyRef.current = labelKey();
         window.clearTimeout(labelDebounceRef.current);
         labelDebounceRef.current = window.setTimeout(refreshLabels, 350);
@@ -166,23 +176,28 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       }
     }, 250);
 
-    const mat = globe.globeMaterial() as unknown as {
-      color: { set: (c: string) => void };
-    };
-    mat.color.set("#0a0f1f");
+    const mat = globe.globeMaterial();
+    mat.shininess = 8;
 
     const w0 = containerRef.current.clientWidth;
     const h0 = containerRef.current.clientHeight;
     globe.width(w0);
     globe.height(h0);
-    globe.pointOfView({ altitude: fitAltitude(w0, h0) });
+    globe.pointOfView({ lat: 18, lng: 25, altitude: fitAltitude(w0, h0, 2) });
     globeRef.current = globe;
+    scheduledLabelKeyRef.current = labelKey();
+    refreshLabels();
     if (import.meta.env.DEV) {
       (window as unknown as { __globe: typeof globe }).__globe = globe;
     }
     if (apiRef) {
       apiRef.current = {
-        flyTo: (lat, lng, altitude) => globe.pointOfView({ lat, lng, altitude }, 1200),
+        flyTo: (lat, lng, altitude) => globe.pointOfView({ lat, lng, altitude }, motionDuration()),
+        zoom: (factor) => {
+          const pov = globe.pointOfView();
+          globe.pointOfView({ ...pov, altitude: Math.max(0.06, Math.min(8, pov.altitude * factor)) }, motionDuration());
+        },
+        reset: () => globe.pointOfView({ lat: 18, lng: 25, altitude: fitAltitude(globe.width(), globe.height(), 2) }, motionDuration()),
       };
     }
 
@@ -196,14 +211,18 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       // camera away from a place the user has navigated to.
       if (zoomRef.current === 0) {
         const pov = globe.pointOfView();
-        globe.pointOfView({ ...pov, altitude: fitAltitude(w, h) });
+        globe.pointOfView({ ...pov, altitude: fitAltitude(w, h, 2) });
       }
+      refreshLabels();
     };
     window.addEventListener("resize", onResize);
+    const observer = new ResizeObserver(onResize);
+    observer.observe(containerRef.current);
     // Initial data load happens via the days effect below.
 
     return () => {
       window.removeEventListener("resize", onResize);
+      observer.disconnect();
       window.clearInterval(zoomPoll);
       window.clearTimeout(debounceRef.current);
       window.clearTimeout(labelDebounceRef.current);
@@ -217,10 +236,21 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
       labelKeyRef.current = "";
       scheduledLabelKeyRef.current = "";
       globe._destructor();
+      labelElements.clear();
+      visibleLabelsRef.current = [];
       globeRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Appearance changes update the existing scene, retaining camera and coverage.
+  useEffect(() => {
+    const globe = globeRef.current;
+    if (!globe) return;
+    // The texture loader owns the material's color field (and clears it once loaded).
+    // Keep the natural surface shared by both appearances instead of tinting it.
+    globe.atmosphereColor(theme === "dark" ? "#64afc7" : "#8ad0dd");
+  }, [theme]);
 
   // Keep the latest onSelect without re-creating the globe.
   const onSelectRef = useRef(onSelect);
@@ -228,21 +258,38 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
     onSelectRef.current = onSelect;
   }, [onSelect]);
 
-  // Identifies the visible label set: zoom tier plus a coarse viewport cell,
-  // so sprite rebuilds only happen when that set meaningfully changes.
+  // Recheck measured bounds after camera movement, including zooming within a
+  // tier. Quantization suppresses work from insignificant camera jitter.
   function labelKey(): string {
     const globe = globeRef.current;
     if (!globe) return "";
     const zoom = zoomRef.current;
-    const span = LABEL_SPAN_BY_ZOOM[zoom] ?? 0;
-    if (span === 0) return `z${zoom}`;
     const pov = globe.pointOfView();
-    const cell = Math.max(2, span / 3);
-    return `z${zoom}:${Math.round(pov.lat / cell)}:${Math.round(pov.lng / cell)}`;
+    return `${zoom}:${pov.lat.toFixed(2)}:${pov.lng.toFixed(2)}:${pov.altitude.toFixed(3)}:${containerRef.current?.clientWidth}:${containerRef.current?.clientHeight}`;
   }
 
-  // Rebuilding text sprites is expensive, so labels are only re-set when the
-  // visible set meaningfully changes.
+  function labelElement(place: Place): HTMLButtonElement {
+    const existing = labelElementsRef.current.get(place);
+    if (existing) return existing;
+    const element = document.createElement("button");
+    element.type = "button";
+    element.className = `globe-place-label ${place.tier}`;
+    element.textContent = place.name;
+    element.setAttribute("aria-label", `Explore ${place.name}${place.detail ? `, ${place.detail}` : ""}`);
+    element.addEventListener("pointerdown", (event) => event.stopPropagation());
+    element.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const altitude = place.tier === "country" ? 1 : place.tier === "state" ? 0.5 : 0.25;
+      globeRef.current?.pointOfView({ lat: place.lat, lng: place.lng, altitude }, motionDuration());
+      onSelectRef.current({ lat: place.lat, lon: place.lng, count: 0, mentions: 0, top_location: place.name },
+        place.tier === "country" ? 5 : place.tier === "state" ? 2 : 0.6);
+    });
+    labelElementsRef.current.set(place, element);
+    return element;
+  }
+
+  // Measure real browser text for collision checks. Only membership changes go
+  // back to the renderer; idle polling never rebuilds labels or their geometry.
   function refreshLabels() {
     const globe = globeRef.current;
     if (!globe) return;
@@ -253,26 +300,41 @@ export default function Globe({ days, onSelect, apiRef }: GlobeProps) {
     if (key === labelKeyRef.current) return;
     labelKeyRef.current = key;
 
-    let labels: Place[] = countryPlaces.slice(0, COUNTRY_COUNT_BY_ZOOM[zoom] ?? 999);
-    if (span > 0) {
-      if (zoom >= 4) {
-        // cityPlaces is pre-sorted by population, so the cap keeps major cities.
-        labels = labels.concat(
-          cityPlaces
-            .filter((p) => inSpan(p, pov.lat, pov.lng, span))
-            .slice(0, MAX_CITY_LABELS)
-        );
-      }
-      // States come after cities: a state name colliding with a major city
-      // (e.g. the Berlin city/state pair) yields to the city label.
-      labels = labels.concat(
-        statePlaces
-          .filter((p) => inSpan(p, pov.lat, pov.lng, span))
-          .slice(0, MAX_STATE_LABELS)
-      );
-      labels = thinLabels(labels, span * 0.28);
+    const tiers = labelTiers(zoom);
+    const labels: Place[] = [];
+    for (const tier of tiers) {
+      if (tier === "country") labels.push(...countryPlaces.slice(0, Math.min(80, COUNTRY_COUNT_BY_ZOOM[zoom])));
+      if (tier === "city") labels.push(...cityPlaces.filter(p => inSpan(p, pov.lat, pov.lng, span)).slice(0, MAX_CITY_LABELS));
+      if (tier === "state") labels.push(...statePlaces.filter(p => inSpan(p, pov.lat, pov.lng, span)).slice(0, MAX_STATE_LABELS));
     }
-    globe.labelsData(labels);
+    const container = containerRef.current;
+    if (!container) return;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    const candidates = labels.filter(p => isLabelFacingCamera(p, pov.lat, pov.lng, pov.altitude)).map(place => {
+      const { x, y } = globe.getScreenCoords(place.lat, place.lng, 0.02);
+      const element = labelElement(place);
+      // Detached candidates need a measurement surface with the same CSS.
+      if (!element.isConnected) {
+        element.style.visibility = "hidden";
+        container.append(element);
+      }
+      const labelWidth = element.offsetWidth;
+      const labelHeight = element.offsetHeight;
+      if (element.style.visibility === "hidden") {
+        element.remove();
+        element.style.visibility = "";
+      }
+      return { place, bounds: { left: x - labelWidth / 2, right: x + labelWidth / 2, top: y - labelHeight / 2, bottom: y + labelHeight / 2 } };
+    });
+    const visible = declutterLabels(candidates, width, height).map(c => c.place);
+    if (visible.length !== visibleLabelsRef.current.length || visible.some((p, i) => p !== visibleLabelsRef.current[i])) {
+      visibleLabelsRef.current = visible;
+      globe.htmlElementsData(visible);
+    }
+    // Bound the cache to this view and currently rendered elements.
+    const current = new Set(labels);
+    for (const place of labelElementsRef.current.keys()) if (!current.has(place)) labelElementsRef.current.delete(place);
   }
 
   // Monotonic token: only the newest load() may publish its result. Without

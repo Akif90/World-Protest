@@ -89,7 +89,7 @@ export default function SearchBar({ onSelect }: SearchBarProps) {
     <div className="search" ref={rootRef}>
       <input
         type="text"
-        placeholder="Search country, state, or city…"
+        placeholder="Search a place"
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);

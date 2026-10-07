@@ -12,9 +12,12 @@ const mock = vi.hoisted(() => ({
   hexes: vi.fn(),
   hexLabel: undefined as undefined | ((bin: unknown) => string),
   onHexClick: undefined as undefined | ((bin: unknown) => void),
+  labelAltitude: 0,
+  heatmapAltitude: 0,
+  hexAltitude: 0,
 }));
 vi.mock("./places", () => ({
-  countries: { features: [] }, countryPlaces: [], statePlaces: [], cityPlaces: [],
+  countries: { features: [] }, countryPlaces: [], statePlaces: [], cityPlaces: [{ name: "Test city", detail: "", lat: 18, lng: 25, tier: "city", pop: 3000000, areaRank: Infinity, search: "test city" }],
 }));
 vi.mock("./api", () => ({ fetchPoints: vi.fn() }));
 vi.mock("globe.gl", () => ({
@@ -27,9 +30,14 @@ vi.mock("globe.gl", () => ({
             Object.assign(mock.pov, value);
             return fluent;
           };
-          if (key === "globeMaterial") return () => ({ color: { set() {} } });
+          // three-globe clears color after its image texture finishes loading.
+          if (key === "getScreenCoords") return () => ({ x: 100, y: 100 });
+          if (key === "globeMaterial") return () => ({ color: null });
           return (...args: unknown[]) => {
-            if (key === "labelsData") mock.labels(...args);
+            if (key === "htmlAltitude") mock.labelAltitude = args[0] as number;
+            if (key === "heatmapBaseAltitude") mock.heatmapAltitude = args[0] as number;
+            if (key === "hexAltitude") mock.hexAltitude = args[0] as number;
+            if (key === "htmlElementsData") mock.labels(...args);
             if (key === "hexBinPointsData") mock.hexes(...args);
             if (key === "hexLabel") mock.hexLabel = args[0] as typeof mock.hexLabel;
             if (key === "onHexClick") mock.onHexClick = args[0] as typeof mock.onHexClick;
@@ -46,6 +54,8 @@ let host: HTMLDivElement;
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   mock.pov = { lat: 0, lng: 0, altitude: 2.5 };
   vi.mocked(fetchPoints).mockImplementation(() => Promise.resolve({ cell_size: 0.25, points: [] }));
@@ -57,6 +67,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 async function mount() {
   await act(async () => root.render(<Globe days={7} onSelect={() => {}} />));
@@ -64,6 +75,11 @@ async function mount() {
 async function advance(ms: number) {
   await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 }
+it("keeps labels above coverage surfaces that would otherwise clip text", async () => {
+  await mount();
+  expect(mock.labelAltitude).toBeGreaterThan(mock.heatmapAltitude);
+  expect(mock.labelAltitude).toBeGreaterThan(mock.hexAltitude);
+});
 it("refreshes labels after zooming and after a stationary pan", async () => {
   await mount();
   mock.labels.mockClear();
@@ -73,6 +89,18 @@ it("refreshes labels after zooming and after a stationary pan", async () => {
   mock.pov.lng = 20;
   await advance(2000);
   expect(mock.labels).toHaveBeenCalledTimes(2);
+});
+it("switches appearance on a textured globe without resetting the camera or coverage", async () => {
+  await mount();
+  mock.pov.lat = 28.6;
+  mock.pov.lng = 77.2;
+  const before = { ...mock.pov };
+  vi.mocked(fetchPoints).mockClear();
+  mock.labels.mockClear();
+  await act(async () => root.render(<Globe days={7} theme="dark" onSelect={() => {}} />));
+  expect(mock.pov).toEqual(before);
+  expect(fetchPoints).not.toHaveBeenCalled();
+  expect(mock.labels).not.toHaveBeenCalled();
 });
 it("accepts a slow viewport response without repeatedly replacing it", async () => {
   await mount();

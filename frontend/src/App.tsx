@@ -1,4 +1,4 @@
-import { Suspense, lazy, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import type { GlobeApi } from "./Globe";
 import EventPanel from "./EventPanel";
 import SearchBar from "./SearchBar";
@@ -13,9 +13,9 @@ import "./App.css";
 const Globe = lazy(() => import("./Globe"));
 
 const DATE_RANGES = [
-  { label: "24h", days: 1 },
-  { label: "7d", days: 7 },
-  { label: "30d", days: 30 },
+  { label: "24 hours", days: 1 },
+  { label: "7 days", days: 7 },
+  { label: "30 days", days: 30 },
 ];
 
 // How close the camera flies and how wide the event query is per place kind.
@@ -31,10 +31,25 @@ const CELL_SIZE: Record<Place["tier"], number> = {
 };
 
 export default function App() {
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    try {
+      const saved = localStorage.getItem("wpg:theme");
+      if (saved === "light" || saved === "dark") return saved;
+    } catch { /* Storage can be blocked in private browsing. */ }
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
   const [days, setDays] = useState(7);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [trendingOpen, setTrendingOpen] = useState(false);
   const globeApi = useRef<GlobeApi | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute(
+      "content", theme === "light" ? "#edf3f5" : "#10212b"
+    );
+    try { localStorage.setItem("wpg:theme", theme); } catch { /* Keep the in-memory preference. */ }
+  }, [theme]);
 
   function selectPlace(place: Place) {
     globeApi.current?.flyTo(place.lat, place.lng, FLY_ALTITUDE[place.tier]);
@@ -58,25 +73,38 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className="app" data-theme={theme}>
       <header className="topbar">
-        <h1>World Protest Globe</h1>
+        <div className="brand"><span className="brand-globe" aria-hidden="true">◎</span>World Protest</div>
         <SearchBar onSelect={selectPlace} />
-        <nav className="range-picker">
+        <button className="theme-toggle" onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+          aria-label={`Switch to ${theme === "light" ? "dark" : "light"} mode`}>
+          <span aria-hidden="true">{theme === "light" ? "☾" : "☀"}</span>
+          {theme === "light" ? "Dark mode" : "Light mode"}
+        </button>
+      </header>
+
+      <section className="explorer-intro" aria-label="Explore protest coverage">
+        <h1>A world in<br />movement.</h1>
+        <p>Explore protests around the world. Choose a place to see its coverage.</p>
+        <nav className="range-picker" aria-label="Time range">
           {DATE_RANGES.map(({ label, days: d }) => (
             <button
               key={label}
               className={d === days ? "active" : ""}
+              aria-pressed={d === days}
               onClick={() => setDays(d)}
             >
               {label}
             </button>
           ))}
         </nav>
-      </header>
+      </section>
 
+      <main className="globe-stage" aria-label="World protest globe">
       <Suspense fallback={<div className="globe-loading">Loading globe…</div>}>
         <Globe
+          theme={theme}
           days={days}
           apiRef={globeApi}
           onSelect={(point, cellSize) =>
@@ -89,14 +117,22 @@ export default function App() {
           }
         />
       </Suspense>
+      <div className="globe-controls" aria-label="Globe navigation">
+        <button aria-label="Zoom in" onClick={() => globeApi.current?.zoom(0.75)}>+</button>
+        <button aria-label="Zoom out" onClick={() => globeApi.current?.zoom(1.35)}>−</button>
+        <button className="reset-globe" aria-label="Reset globe view" onClick={() => globeApi.current?.reset()}>↺</button>
+      </div>
+      </main>
+      <div className="map-caption"><span>Drag to explore · Scroll to zoom</span><span className="density-legend">Fewer <i aria-hidden="true" /> More events</span></div>
 
       <button
         className="trending-toggle"
         onClick={() => setTrendingOpen((v) => !v)}
-        aria-label="Toggle trending news"
+        aria-label="Toggle places in focus"
         aria-expanded={trendingOpen}
+        aria-controls="places-in-focus"
       >
-        🔥
+        Places in focus <span aria-hidden="true">{trendingOpen ? "−" : "+"}</span>
       </button>
 
       <TrendingPanel days={days} onSelect={selectTrending} open={trendingOpen} />

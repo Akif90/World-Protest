@@ -77,13 +77,13 @@ export function labelColor(place: Place): string {
 export const DEFAULT_ALTITUDE = 2.5;
 const CAMERA_FOV_DEG = 50; // three.js perspective camera default used by globe.gl
 
-export function fitAltitude(width: number, height: number): number {
+export function fitAltitude(width: number, height: number, minimumAltitude = DEFAULT_ALTITUDE): number {
   if (!width || !height) return DEFAULT_ALTITUDE;
   const halfV = (CAMERA_FOV_DEG / 2) * (Math.PI / 180);
   const halfH = Math.atan(Math.tan(halfV) * (width / height));
   const limiting = Math.min(halfV, halfH) * 0.97; // snug fit, small edge margin
   // Globe radius is 1 unit here; altitude is expressed in radii above surface.
-  return Math.max(DEFAULT_ALTITUDE, 1 / Math.sin(limiting) - 1);
+  return Math.max(minimumAltitude, 1 / Math.sin(limiting) - 1);
 }
 
 // Warm-only ramp: red through orange to near-white. Against the cool navy
