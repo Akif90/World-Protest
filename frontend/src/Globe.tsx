@@ -122,7 +122,7 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
         const h = currentHexBinsRef.current.get(id);
         if (!h) return "";
         const top = h.points.reduce((a, b) => (b.count > a.count ? b : a), h.points[0]);
-        return `<div style="font: 12px sans-serif; background: #111a; padding: 6px 8px; border-radius: 6px;">
+        return `<div>
           <b>${top?.top_location ?? "Unknown location"}</b><br/>
           ${h.sumWeight} protest event${h.sumWeight === 1 ? "" : "s"}
         </div>`;

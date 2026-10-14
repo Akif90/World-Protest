@@ -31,6 +31,18 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid 
 .globe-controls button:hover { background: var(--soft); }
 .globe-controls button:focus-visible { outline-offset: -4px; }
 .globe-controls .reset-globe { font-size: 20px; }
+/* CSS2D names receive inline z-index values. Hover details must paint above
+   those names, while staying inside the globe stage's isolated context. */
+.globe-stage .float-tooltip-kap {
+  z-index: 2000;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  line-height: 1.5;
+  box-shadow: var(--shadow);
+}
 .map-caption { position: absolute; left: 32px; right: 32px; bottom: 188px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; pointer-events: none; }
 .density-legend { display: flex; align-items: center; gap: 6px; }
 .density-legend i { width: 48px; height: 6px; border-radius: 8px; background: linear-gradient(90deg, #ff5028, #ffb43c, #fff0af); }
