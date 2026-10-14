@@ -102,23 +102,27 @@ export function fetchPopular(
   return get("/api/popular", { days, limit }, signal);
 }
 
-/**
- * Opaque per-browser id so the server can collapse repeat opens by one reader
- * without identifying anyone. Persisted so the same browser keeps one id.
- */
+// Retain the ID even when browser storage is unavailable. Each page session
+// gets its own random value, rather than sharing one anonymous identity.
+let sessionViewerId: string | undefined;
+
+/** Pseudonymous browser ID, persisted when storage permits it. */
 function viewerId(): string {
+  if (sessionViewerId) return sessionViewerId;
   const KEY = "wpg:viewer";
   try {
-    let id = localStorage.getItem(KEY);
-    if (!id) {
-      id = crypto.randomUUID();
-      localStorage.setItem(KEY, id);
-    }
-    return id;
-  } catch {
-    // Private mode or blocked storage: fall back to an ephemeral id.
-    return "anonymous";
-  }
+    const stored = localStorage.getItem(KEY);
+    if (stored) return (sessionViewerId = stored);
+  } catch { /* Generate a session ID if storage reads are blocked. */ }
+
+  // randomUUID needs a secure context. getRandomValues also works on HTTP
+  // previews and supplies a cryptographically random 128-bit fallback.
+  sessionViewerId = crypto.randomUUID?.() ?? Array.from(
+    crypto.getRandomValues(new Uint8Array(16)),
+    (byte) => byte.toString(16).padStart(2, "0")
+  ).join("");
+  try { localStorage.setItem(KEY, sessionViewerId); } catch { /* Keep it in memory. */ }
+  return sessionViewerId;
 }
 
 /** Fire-and-forget: count that the reader opened this event's article. */
