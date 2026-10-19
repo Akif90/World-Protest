@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ProtestEvent } from "./api";
-import { fetchPopular, fetchTrending } from "./api";
+import { API_CACHE_TTL_MS, fetchPopular, fetchTrending } from "./api";
 import { eventHeadline } from "./headline";
 
 interface TrendingPanelProps {
@@ -19,20 +19,30 @@ export default function TrendingPanel({ days, onSelect, open }: TrendingPanelPro
   const [retry, setRetry] = useState(0);
 
   useEffect(() => {
-    const ctrl = new AbortController();
     setLoading(true);
     setError(false);
     setTrending([]);
     setMostRead([]);
-    Promise.allSettled([fetchTrending(days, 3, ctrl.signal), fetchPopular(days, 5, ctrl.signal)])
-      .then(([recent, popular]) => {
-        if (ctrl.signal.aborted) return;
-        if (recent.status === "fulfilled") setTrending(recent.value);
-        if (popular.status === "fulfilled") setMostRead(popular.value);
-        setError(recent.status === "rejected" || popular.status === "rejected");
-        setLoading(false);
-      });
-    return () => ctrl.abort();
+    let ctrl: AbortController | undefined;
+    const refresh = () => {
+      ctrl?.abort();
+      ctrl = new AbortController();
+      const signal = ctrl.signal;
+      Promise.allSettled([fetchTrending(days, 3, signal), fetchPopular(days, 5, signal)])
+        .then(([recent, popular]) => {
+          if (signal.aborted) return;
+          if (recent.status === "fulfilled") setTrending(recent.value);
+          if (popular.status === "fulfilled") setMostRead(popular.value);
+          setError(recent.status === "rejected" || popular.status === "rejected");
+          setLoading(false);
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, API_CACHE_TTL_MS + 1000);
+    return () => {
+      window.clearInterval(timer);
+      ctrl?.abort();
+    };
   }, [days, retry]);
 
   const item = (e: ProtestEvent, meta: string) => (

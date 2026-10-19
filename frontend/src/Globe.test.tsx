@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { latLngToCell } from "h3-js";
 import Globe from "./Globe";
-import { fetchPoints } from "./api";
+import { API_CACHE_TTL_MS, fetchPoints } from "./api";
 
 const mock = vi.hoisted(() => ({
   pov: { lat: 0, lng: 0, altitude: 2.5 },
@@ -19,7 +19,7 @@ const mock = vi.hoisted(() => ({
 vi.mock("./places", () => ({
   countries: { features: [] }, countryPlaces: [], statePlaces: [], cityPlaces: [{ name: "Test city", detail: "", lat: 18, lng: 25, tier: "city", pop: 3000000, areaRank: Infinity, search: "test city" }],
 }));
-vi.mock("./api", () => ({ fetchPoints: vi.fn() }));
+vi.mock("./api", () => ({ API_CACHE_TTL_MS: 120_000, fetchPoints: vi.fn() }));
 vi.mock("globe.gl", () => ({
   default: class {
     constructor() {
@@ -120,6 +120,12 @@ it("does not refetch a successful worldwide fallback on every poll", async () =>
   mock.pov.altitude = 0.1;
   mock.pov.lng = 179;
   await advance(3000);
+  expect(fetchPoints).toHaveBeenCalledTimes(1);
+});
+it("refreshes the points for a stationary camera after the cache expires", async () => {
+  await mount();
+  vi.mocked(fetchPoints).mockClear();
+  await advance(API_CACHE_TTL_MS + 1000);
   expect(fetchPoints).toHaveBeenCalledTimes(1);
 });
 it("uses the latest Delhi count when the hex library reuses an old bin", async () => {

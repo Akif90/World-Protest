@@ -1,4 +1,28 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+export const API_CACHE_TTL_MS = 2 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 48;
+
+interface CacheEntry {
+  value: unknown;
+  expiresAt: number;
+}
+
+const responseCache = new Map<string, CacheEntry>();
+
+function abortError(): DOMException {
+  return new DOMException("The request was aborted", "AbortError");
+}
+
+function cacheResponse(key: string, value: unknown): void {
+  for (const [url, entry] of responseCache) {
+    if (entry.expiresAt <= Date.now()) responseCache.delete(url);
+  }
+  responseCache.delete(key);
+  responseCache.set(key, { value, expiresAt: Date.now() + API_CACHE_TTL_MS });
+  if (responseCache.size > MAX_CACHE_ENTRIES) {
+    responseCache.delete(responseCache.keys().next().value!);
+  }
+}
 
 export interface GridPoint {
   lat: number;
@@ -51,9 +75,23 @@ async function get<T>(
   const qs = new URLSearchParams(
     Object.entries(params).map(([k, v]) => [k, String(v)])
   );
-  const res = await fetch(`${API_BASE}${path}?${qs}`, { signal });
+  if (signal?.aborted) throw abortError();
+  const url = `${API_BASE}${path}?${qs}`;
+  const cached = responseCache.get(url);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) {
+      responseCache.delete(url);
+      responseCache.set(url, cached);
+      return cached.value as T;
+    }
+    responseCache.delete(url);
+  }
+  const res = await fetch(url, { signal, cache: "no-store" });
   if (!res.ok) throw new Error(`${path} failed: ${res.status}`);
-  return res.json();
+  const value = await res.json() as T;
+  if (signal?.aborted) throw abortError();
+  cacheResponse(url, value);
+  return value;
 }
 
 export interface Bbox {
@@ -132,6 +170,12 @@ export function reportOpen(eventId: number): void {
     keepalive: true,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ viewer_id: viewerId() }),
+  }).then((res) => {
+    if (res.ok) {
+      for (const url of responseCache.keys()) {
+        if (url.startsWith(`${API_BASE}/api/popular?`)) responseCache.delete(url);
+      }
+    }
   }).catch(() => { });
 }
 

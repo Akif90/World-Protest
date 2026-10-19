@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import GlobeGL from "globe.gl";
 import { latLngToCell } from "h3-js";
 import type { Bbox, GridPoint, PointsResponse } from "./api";
-import { fetchPoints } from "./api";
+import { API_CACHE_TTL_MS, fetchPoints } from "./api";
 import type { Place } from "./places";
 import { countries, countryPlaces, statePlaces, cityPlaces } from "./places";
 import { declutterLabels, isLabelFacingCamera, labelTiers } from "./globe-labels";
@@ -442,12 +442,14 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
     }
   }
 
-  // Refetch when the date-range filter changes.
+  // Refetch when the date-range filter changes and while the camera is idle.
   useEffect(() => {
     // Remove old hexes and their hover target while the new range loads.
     currentHexBinsRef.current.clear();
     globeRef.current?.hexBinPointsData([]).heatmapsData([]);
     void load();
+    const refresh = window.setInterval(() => { void load(); }, API_CACHE_TTL_MS + 1000);
+    return () => window.clearInterval(refresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days]);
 

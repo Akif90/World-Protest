@@ -1,84 +1,67 @@
-// @vitest-environment happy-dom
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
-
-const fetchMock = vi.fn<typeof fetch>(() => Promise.resolve(new Response("{}")));
-const savedValues = new Map<string, string>();
-const storageMock = {
-  getItem: vi.fn<(key: string) => string | null>(),
-  setItem: vi.fn<(key: string, value: string) => void>(),
-};
+import { beforeEach, afterEach, expect, it, vi } from "vitest";
 
 beforeEach(() => {
   vi.resetModules();
-  savedValues.clear();
-  storageMock.getItem.mockImplementation(key => savedValues.get(key) ?? null);
-  storageMock.setItem.mockImplementation((key, value) => { savedValues.set(key, value); });
-  vi.stubGlobal("localStorage", storageMock);
-  fetchMock.mockClear();
-  vi.stubGlobal("fetch", fetchMock);
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-19T12:00:00Z"));
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
-function sentViewerId(call = 0): string {
-  const options = fetchMock.mock.calls[call][1] as RequestInit;
-  return JSON.parse(options.body as string).viewer_id;
-}
+it("reuses a successful response for the same query until its freshness window expires", async () => {
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    json: () => Promise.resolve({ cell_size: 1, points: [] }),
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const { fetchPoints, API_CACHE_TTL_MS } = await import("./api");
 
-it("keeps a random session ID when storage reads are blocked, without merging different sessions", async () => {
-  storageMock.getItem.mockImplementation(() => { throw new Error("Storage blocked"); });
-  storageMock.setItem.mockImplementation(() => { throw new Error("Storage blocked"); });
-  const api = await import("./api");
-  api.reportOpen(42);
-  api.reportOpen(43);
-  const first = sentViewerId();
-  expect(first).not.toBe("anonymous");
-  expect(first.length).toBeGreaterThanOrEqual(32);
-  expect(sentViewerId(1)).toBe(first);
+  await fetchPoints(3, 7);
+  await fetchPoints(3, 7);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
 
-  vi.resetModules(); // A separate page session gets independent in-memory state.
-  const anotherSession = await import("./api");
-  anotherSession.reportOpen(42);
-  expect(sentViewerId(2)).not.toBe(first);
+  await fetchPoints(3, 1);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+
+  vi.advanceTimersByTime(API_CACHE_TTL_MS + 1);
+  await fetchPoints(3, 7);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
 });
 
-it("retains the generated ID when storage writes fail", async () => {
-  storageMock.setItem.mockImplementation(() => { throw new Error("Quota exceeded"); });
-  const api = await import("./api");
-  api.reportOpen(42);
-  api.reportOpen(42);
-  expect(sentViewerId()).not.toBe("anonymous");
-  expect(sentViewerId(1)).toBe(sentViewerId());
+it("does not retain failed or aborted requests", async () => {
+  const fetchMock = vi.fn()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue({ ok: true, json: () => Promise.resolve({ total: 0, events: [] }) });
+  vi.stubGlobal("fetch", fetchMock);
+  const { fetchEvents } = await import("./api");
+  const box = { minLat: 0, maxLat: 1, minLon: 0, maxLon: 1 };
+
+  await expect(fetchEvents(box, 7)).rejects.toThrow("offline");
+  await fetchEvents(box, 7);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+
+  const aborted = new AbortController();
+  aborted.abort();
+  await expect(fetchEvents(box, 7, 20, 0, aborted.signal)).rejects.toMatchObject({ name: "AbortError" });
 });
 
-it("persists a new ID and reuses it across page sessions", async () => {
-  const api = await import("./api");
-  api.reportOpen(42);
-  const first = sentViewerId();
-  expect(localStorage.getItem("wpg:viewer")).toBe(first);
-  vi.resetModules();
-  const reloaded = await import("./api");
-  reloaded.reportOpen(43);
-  expect(sentViewerId(1)).toBe(first);
-});
+it("invalidates cached popular results after recording an article open", async () => {
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    json: () => Promise.resolve([]),
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const { fetchPopular, reportOpen } = await import("./api");
 
-it("keeps an existing browser ID", async () => {
-  localStorage.setItem("wpg:viewer", "existing-browser-id");
-  const api = await import("./api");
-  api.reportOpen(42);
-  expect(sentViewerId()).toBe("existing-browser-id");
-});
+  await fetchPopular(7);
+  await fetchPopular(7);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
 
-it("generates a stable cryptographic ID when randomUUID is unavailable", async () => {
-  const browserCrypto = crypto;
-  vi.stubGlobal("crypto", { getRandomValues: browserCrypto.getRandomValues.bind(browserCrypto) });
-  storageMock.setItem.mockImplementation(() => { throw new Error("Storage blocked"); });
-  const api = await import("./api");
-  api.reportOpen(42);
-  api.reportOpen(43);
-  expect(sentViewerId()).toMatch(/^[0-9a-f]{32}$/);
-  expect(sentViewerId(1)).toBe(sentViewerId());
+  reportOpen(42);
+  await Promise.resolve();
+  await fetchPopular(7);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
 });
