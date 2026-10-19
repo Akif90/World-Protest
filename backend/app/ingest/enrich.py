@@ -52,7 +52,7 @@ def _decode(body: bytes, response: httpx.Response) -> str:
 
     Regional news sites still serve ISO-8859-1 / windows-1252. Forcing UTF-8
     turns accented headlines into replacement characters, which both looks
-    broken and corrupts the article title used as the story dedup key.
+    broken and corrupts the displayed article title.
     """
     encodings: list[str] = []
     if response.charset_encoding:  # from the Content-Type header

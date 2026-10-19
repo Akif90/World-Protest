@@ -1,9 +1,7 @@
 """Tests for article-title cleaning and charset handling.
 
 _clean_title previously joined all-but-the-last separator segment, which kept
-the middle site name in "Headline | Site | Network". Two copies of one story
-then differed only by that suffix and failed to collapse under the story-dedup
-key, so duplicates reappeared in the panel.
+the middle site name in "Headline | Site | Network". The panel should display the headline without those publisher suffixes.
 """
 
 import httpx
@@ -58,7 +56,7 @@ def test_decode_uses_header_charset():
     """Latin-1 pages must not be forced through UTF-8.
 
     Doing so replaces accented characters, which both looks broken and corrupts
-    the title used as the story dedup key.
+    the displayed title.
     """
     text = "Manifestación en Madrid"
     body = text.encode("iso-8859-1")

@@ -50,7 +50,8 @@ def add_stories(sessions):
     with sessions() as session:
         for i in (1, 2, 3):
             session.add(db.Event(global_event_id=i, event_date=db.utcnow().date(),
-                                 lat=i, lon=i, article_title="Shared headline" if i < 3 else "Other story"))
+                                 lat=i, lon=i, source_url="https://example.com/shared",
+                                 article_title="Shared headline" if i < 3 else "Other story"))
         session.commit()
 
 
@@ -74,7 +75,52 @@ def test_all_ingested_stories_appear_in_feeds_without_model_review(database):
     assert [event["id"] for event in routes.popular(days=7, limit=5)] == [4, 3, 2, 1]
 
 
-def test_reader_is_deduplicated_across_locations_and_concurrent_requests(database):
+def test_title_enrichment_does_not_change_event_identity_or_pagination(database):
+    with database() as session:
+        for event_id in (1, 2):
+            session.add(db.Event(
+                global_event_id=event_id, event_date=db.utcnow().date(),
+                lat=1, lon=1, num_mentions=5,
+                source_url=f"https://example.com/{event_id}",
+            ))
+        session.commit()
+
+    def snapshot():
+        pages = [routes.events(min_lat=0, max_lat=2, min_lon=0, max_lon=2,
+                               days=7, limit=1, offset=offset) for offset in (0, 1)]
+        assert [page["total"] for page in pages] == [2, 2]
+        assert [[event["id"] for event in page["events"]] for page in pages] == [[1], [2]]
+        grid = routes.points(zoom=0, days=7, min_lat=0, max_lat=2, min_lon=0, max_lon=2)
+        assert len(grid["points"]) == 1
+        assert grid["points"][0]["count"] == 2
+        assert grid["points"][0]["mentions"] == 5
+        assert [row["id"] for row in routes.popular(days=7, limit=5)] == [1, 2]
+
+    assert routes.record_open(1, "reader")["counted"]
+    assert routes.record_open(2, "reader")["counted"]
+    snapshot()
+    with database() as session:
+        for event in session.scalars(select(db.Event)):
+            event.article_title = "Same headline"
+            event.source_url = "https://example.com/shared"
+        session.commit()
+    snapshot()
+    assert routes.record_open(1, "reader")["counted"] is False
+    assert routes.record_open(2, "reader")["counted"] is False
+
+
+def test_reimport_updates_only_the_matching_gdelt_id(database):
+    rows = gdelt._parse_rows((make_row() + "\n" + make_row(COL_GLOBAL_EVENT_ID="1002")).encode())
+    assert gdelt._upsert(rows) == 2
+    updated = dict(rows[0], num_mentions=99)
+    assert gdelt._upsert([rows[0], updated]) == 1
+    with database() as session:
+        assert session.scalar(select(func.count()).select_from(db.Event)) == 2
+        assert session.get(db.Event, 1001).num_mentions == 99
+        assert session.get(db.Event, 1002).num_mentions == rows[1]["num_mentions"]
+
+
+def test_reader_opens_are_deduplicated_per_event_under_concurrency(database):
     add_stories(database)
     barrier = Barrier(8)
 
@@ -83,12 +129,12 @@ def test_reader_is_deduplicated_across_locations_and_concurrent_requests(databas
         return routes.record_open(1 + i % 2, "reader")["counted"]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        assert sum(pool.map(open_story, range(8))) == 1
+        assert sum(pool.map(open_story, range(8))) == 2
     assert routes.record_open(2, "reader")["counted"] is False
     assert routes.record_open(3, "reader")["counted"] is True
     assert routes.record_open(2, "another-reader")["counted"] is True
-    shared = next(row for row in routes.popular(days=7, limit=5) if row["title"] == "Shared headline")
-    assert shared["opens"] == 2
+    popular = {row["id"]: row["opens"] for row in routes.popular(days=7, limit=5)}
+    assert popular == {1: 1, 2: 2, 3: 1}
 
 
 def test_reader_can_open_again_after_dedup_window(database):
@@ -98,7 +144,7 @@ def test_reader_can_open_again_after_dedup_window(database):
         row = session.scalar(select(db.EventOpen))
         row.opened_at = db.utcnow() - timedelta(hours=routes.OPEN_DEDUP_WINDOW_HOURS, seconds=1)
         session.commit()
-    assert routes.record_open(2, "reader")["counted"]
+    assert routes.record_open(1, "reader")["counted"]
 
 
 def test_ingestion_recovers_downtime_and_retries_failed_archives(database, monkeypatch):

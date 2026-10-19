@@ -2,8 +2,7 @@ import hashlib
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from sqlalchemy import String, cast, func, select, text
-from sqlalchemy.orm import aliased
+from sqlalchemy import func, select, text
 
 from app.config import OPEN_DEDUP_WINDOW_HOURS
 from app.db import Event, EventOpen, SessionLocal, utcnow
@@ -17,23 +16,6 @@ MAX_ZOOM = max(CELL_SIZES)
 
 def _since(days: int) -> date:
     return date.today() - timedelta(days=days)
-
-
-def _story_key():
-    """Expression identifying one distinct story.
-
-    GDELT emits a separate event per (article x location the article mentions),
-    so one story can appear a dozen times -- in this dataset a single article
-    was geocoded to 8 different places, and another produced 17 rows from just
-    3 URLs. Title is the better key because syndicated copies share a headline
-    across several URLs; fall back to the URL, then to the event id so rows
-    with neither never collapse into each other.
-    """
-    return func.coalesce(
-        func.nullif(Event.article_title, ""),
-        Event.source_url,
-        cast(Event.global_event_id, String),
-    )
 
 
 def _bbox_filters(
@@ -65,16 +47,13 @@ def points(
     # Snap each event to its cell center so identical cells group together.
     cell_lat = (func.floor(Event.lat / cell) * cell + cell / 2).label("lat")
     cell_lon = (func.floor(Event.lon / cell) * cell + cell / 2).label("lon")
-    key = _story_key()
     stmt = (
         select(
             cell_lat,
             cell_lon,
-            func.count(func.distinct(key)).label("count"),
-            # Mentions must be aggregated over the SAME set as count. Summing
-            # num_mentions across raw rows multiplies one article's mentions by
-            # however many locations it was geocoded to, so a cell holding one
-            # story could read "1 event, 200 mentions".
+            func.count(Event.global_event_id).label("count"),
+            # Keep the strongest mention count in each cell; separate GDELT
+            # events can repeat an article's coverage, so do not sum mentions.
             func.max(Event.num_mentions).label("mentions"),
             func.mode().within_group(Event.location_name).label("top_location"),
         )
@@ -111,36 +90,23 @@ def events(
     """Individual events inside a bounding box, most-mentioned (trending) first.
 
     Returns the page plus the total match count so clients can show live
-    totals that follow the active date filter.
+    totals that follow the active date filter. Each GDELT ID is a separate
+    event, regardless of matching titles or source URLs.
     """
     where = (
         Event.event_date >= _since(days),
         Event.lat.between(min_lat, max_lat),
         Event.lon.between(min_lon, max_lon),
     )
-    key = _story_key()
-    # DISTINCT ON keeps one row per story; ordering by mentions inside each
-    # group keeps the most-covered instance as the representative. Mentions are
-    # deliberately NOT summed across duplicates -- they are repeated counts of
-    # the same article, so the max reflects reach and a sum would inflate it.
-    deduped = (
+    stmt = (
         select(Event)
         .where(*where)
-        .distinct(key)
-        .order_by(key, Event.num_mentions.desc(), Event.global_event_id)
-        .subquery()
-    )
-    story = aliased(Event, deduped)
-    stmt = (
-        select(story)
-        .order_by(story.num_mentions.desc(), story.global_event_id)
+        .order_by(Event.num_mentions.desc(), Event.global_event_id)
         .offset(offset)
         .limit(limit)
     )
     with SessionLocal() as session:
-        total = session.execute(
-            select(func.count(func.distinct(key))).where(*where)
-        ).scalar()
+        total = session.scalar(select(func.count()).select_from(Event).where(*where))
         rows = session.execute(stmt).scalars().all()
     return {"total": total, "events": [_event_json(e) for e in rows]}
 
@@ -149,8 +115,8 @@ def events(
 def record_open(event_id: int, viewer_id: str = Body(embed=True, default="")):
     """Record that a reader opened this event's source article.
 
-    Repeat opens from the same viewer within the dedup window are ignored, so
-    the "most read" ranking counts distinct readers rather than clicks. The
+    Repeat opens of the same GDELT event by a viewer within the window are
+    ignored, so the "most read" ranking counts readers per event. The
     viewer id is an opaque browser-generated string; no identity is attached.
     """
     viewer = (viewer_id or "").strip()[:64]
@@ -159,21 +125,16 @@ def record_open(event_id: int, viewer_id: str = Body(embed=True, default="")):
         if event is None:
             raise HTTPException(status_code=404, detail="event not found")
         if viewer:
-            # Serialize this viewer's opens across all stories. A viewer-level
-            # lock also remains stable when enrichment changes a story's title.
+            # Serialize this viewer's opens so concurrent requests cannot both count.
             lock_id = int.from_bytes(
                 hashlib.sha256(viewer.encode()).digest()[:8], "big", signed=True
             )
             session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_id})
-            story_key = session.scalar(
-                select(_story_key()).where(Event.global_event_id == event_id)
-            )
             cutoff = utcnow() - timedelta(hours=OPEN_DEDUP_WINDOW_HOURS)
             already = session.execute(
                 select(EventOpen.id)
-                .join(Event, Event.global_event_id == EventOpen.event_id)
                 .where(
-                    _story_key() == story_key,
+                    EventOpen.event_id == event_id,
                     EventOpen.viewer_id == viewer,
                     EventOpen.opened_at >= cutoff,
                 )
@@ -188,36 +149,18 @@ def record_open(event_id: int, viewer_id: str = Body(embed=True, default="")):
 
 @router.get("/popular")
 def popular(days: int = Query(30, ge=1, le=90), limit: int = Query(5, ge=1, le=20)):
-    """Events readers opened most, within the active date window.
-
-    Grouped by story rather than by event id: because GDELT splits one article
-    across several events, opens on what a reader sees as a single story would
-    otherwise occupy several slots in the list.
-    """
-    key = _story_key().label("story")
-    opens = func.count(func.distinct(EventOpen.id)).label("opens")
-    # Pick one representative event id per story -- the most-mentioned one, to
-    # match how /api/events chooses its representative.
-    ranked = (
-        select(
-            key,
-            opens,
-            func.max(Event.num_mentions).label("top_mentions"),
-            func.min(Event.global_event_id).label("any_event_id"),
-        )
+    """GDELT events readers opened most, within the active event-date window."""
+    opens = func.count(EventOpen.id).label("opens")
+    stmt = (
+        select(Event, opens)
         .join(EventOpen, EventOpen.event_id == Event.global_event_id)
         .where(Event.event_date >= _since(days))
-        .group_by(key)
-        .order_by(opens.desc(), func.max(Event.num_mentions).desc())
+        .group_by(Event.global_event_id)
+        .order_by(opens.desc(), Event.num_mentions.desc(), Event.global_event_id)
         .limit(limit)
-        .subquery()
     )
     with SessionLocal() as session:
-        rows = session.execute(
-            select(Event, ranked.c.opens)
-            .join(ranked, ranked.c.any_event_id == Event.global_event_id)
-            .order_by(ranked.c.opens.desc(), Event.num_mentions.desc())
-        ).all()
+        rows = session.execute(stmt).all()
     return [{**_event_json(e), "opens": o} for e, o in rows]
 
 

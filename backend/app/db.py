@@ -95,9 +95,6 @@ _MIGRATIONS = (
     # instead of sorting the whole table on an unindexed column.
     "CREATE INDEX IF NOT EXISTS ix_events_unenriched ON events (ingested_at DESC) "
     "WHERE article_title IS NULL",
-    # Lets DISTINCT ON read pre-sorted input rather than sorting the matched set.
-    "CREATE INDEX IF NOT EXISTS ix_events_story_key ON events "
-    "((coalesce(nullif(article_title, ''), source_url, CAST(global_event_id AS VARCHAR))))",
     # The trending query filters on date alone across the whole world.
     "CREATE INDEX IF NOT EXISTS ix_events_date_mentions ON events "
     "(event_date, num_mentions DESC)",

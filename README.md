@@ -4,7 +4,7 @@ Live protest and civil-unrest events from around the world, rendered as an inter
 
 Density is encoded differently per zoom level, following Snap Map's approach rather than scaling one style up and down: a Gaussian **heatmap** for the global glance, and uniform **H3 hex bins** once close enough to read and tap. Hex cells are all the same size, so area never conflates "how big is the grid cell" with "how many events".
 
-Also: progressive place labels (countries → states → cities, from [Natural Earth](https://www.naturalearthdata.com/) via `frontend/src/data/*.json`) with collision culling, place search with fly-to, trending and reader-driven "most read" cards, and an infinite-scroll headline-first event panel. Duplicate stories are collapsed server-side, since GDELT emits one event per (article × location mentioned).
+Also: progressive place labels (countries → states → cities, from [Natural Earth](https://www.naturalearthdata.com/) via `frontend/src/data/*.json`) with collision culling, place search with fly-to, trending and reader-driven "most read" cards, and an infinite-scroll headline-first event panel. Events are identified only by GDELT ID: importing the same ID updates its existing row, while different IDs remain separate in the API even when their titles or URLs match. Title enrichment changes display text, not event identity.
 
 Installable PWA with a mobile-first layout: on phones the event panel becomes a bottom sheet, trending collapses behind a 🔥 toggle, and search takes the full top row. The service worker precaches the app shell (`npm run build` generates it; install prompts require HTTPS in production).
 
@@ -124,7 +124,7 @@ after one day. Completed exports are not downloaded again by the scheduler.
 
 ## Roadmap (deliberately deferred)
 
-- Semantic story clustering — title matching cannot merge one event reported under different headlines.
+- SLM-based story clustering — future title-based deduplication; currently only GDELT IDs determine event identity.
 - Alembic migrations, once schema changes outgrow the idempotent DDL in `app/db.py`.
 
 - Broader categories/tags (sports, tech, …) — the `events.category` column is already in place.
