@@ -33,6 +33,9 @@ ALLOWED_ORIGINS = _csv_env("ALLOWED_ORIGINS", DEFAULT_DEV_ORIGINS)
 ENRICH_TIMEOUT_SECONDS = float(os.environ.get("ENRICH_TIMEOUT_SECONDS", "8"))
 ENRICH_WORKERS = int(os.environ.get("ENRICH_WORKERS", "10"))
 ENRICH_BATCH_SIZE = int(os.environ.get("ENRICH_BATCH_SIZE", "50"))
+ENRICH_RETRY_BASE_SECONDS = int(os.environ.get("ENRICH_RETRY_BASE_SECONDS", "900"))
+ENRICH_RETRY_MAX_SECONDS = int(os.environ.get("ENRICH_RETRY_MAX_SECONDS", "86400"))
+ENRICH_RETRY_MAX_DAYS = int(os.environ.get("ENRICH_RETRY_MAX_DAYS", "7"))
 
 # Rows per INSERT. Postgres caps a statement at 65535 bind parameters, so this
 # stays well under 65535 / (columns per row).

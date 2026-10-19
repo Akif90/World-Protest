@@ -48,9 +48,11 @@ class Event(Base):
     num_mentions: Mapped[int] = mapped_column(Integer, default=0)
     avg_tone: Mapped[float | None] = mapped_column(Float)
     source_url: Mapped[str | None] = mapped_column(String(2048))
-    # Real article <title>, filled by the enrichment worker. NULL = not yet
-    # attempted; empty string = attempted but no usable title.
+    # NULL = pending (possibly awaiting retry); '' = terminally unavailable.
     article_title: Mapped[str | None] = mapped_column(String(512))
+    title_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    title_first_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    title_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     category: Mapped[str] = mapped_column(String(32), default="protest", nullable=False)
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
@@ -90,11 +92,16 @@ class EventOpen(Base):
 # changes outpace what a handful of IF NOT EXISTS statements can express.
 _MIGRATIONS = (
     "ALTER TABLE events ADD COLUMN IF NOT EXISTS article_title VARCHAR(512)",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS title_attempts INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS title_first_attempt_at TIMESTAMPTZ",
+    "ALTER TABLE events ADD COLUMN IF NOT EXISTS title_next_attempt_at TIMESTAMPTZ",
+    # Legacy failures have no classification. Requeue them once; new terminal
+    # outcomes have a positive attempt count and are left alone on restart.
+    "UPDATE events SET article_title = NULL WHERE article_title = '' AND title_attempts = 0",
     "ALTER TABLE event_opens ADD COLUMN IF NOT EXISTS viewer_id VARCHAR(64)",
-    # Serves the enrichment worker's "oldest unenriched first" scan directly,
-    # instead of sorting the whole table on an unindexed column.
-    "CREATE INDEX IF NOT EXISTS ix_events_unenriched ON events (ingested_at DESC) "
-    "WHERE article_title IS NULL",
+    "CREATE INDEX IF NOT EXISTS ix_events_title_due ON events "
+    "((coalesce(title_next_attempt_at, ingested_at)), global_event_id) "
+    "WHERE article_title IS NULL AND source_url IS NOT NULL",
     # The trending query filters on date alone across the whole world.
     "CREATE INDEX IF NOT EXISTS ix_events_date_mentions ON events "
     "(event_date, num_mentions DESC)",

@@ -6,8 +6,60 @@ the middle site name in "Headline | Site | Network". The panel should display th
 
 import httpx
 import pytest
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
-from app.ingest.enrich import _clean_title, _decode, fetch_title
+from app.ingest.enrich import TitleResult, _clean_title, _decode, fetch_title
+from app.ingest import enrich
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+def test_transient_statuses_are_retryable(status):
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(status))) as client:
+        assert fetch_title("https://example.com/story", client) == TitleResult(None)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410])
+def test_permanent_statuses_are_terminal(status):
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(status))) as client:
+        assert fetch_title("https://example.com/story", client) == TitleResult()
+
+
+@pytest.mark.parametrize("header", ["3600", "date", "invalid"])
+def test_retry_after_parses_delay_and_http_date(monkeypatch, header):
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    monkeypatch.setattr(enrich, "utcnow", lambda: now)
+    expected = now + timedelta(hours=1)
+    value = format_datetime(expected, usegmt=True) if header == "date" else header
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(429, headers={"Retry-After": value})
+    )) as client:
+        result = fetch_title("https://example.com/story", client)
+    assert result == TitleResult(None, None if header == "invalid" else expected)
+
+
+def test_fetch_title_retries_timeouts():
+    def timeout(request):
+        raise httpx.ReadTimeout("slow publisher", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
+        assert fetch_title("https://example.com/story", client) == TitleResult(None)
+
+
+def test_missing_title_is_terminal():
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<html>No title</html>")
+    )) as client:
+        assert fetch_title("https://example.com/story", client) == TitleResult()
+
+
+@pytest.mark.parametrize("error", [httpx.InvalidURL, httpx.UnsupportedProtocol])
+def test_invalid_url_is_terminal(error):
+    def invalid(request):
+        raise error("invalid source URL")
+
+    with httpx.Client(transport=httpx.MockTransport(invalid)) as client:
+        assert fetch_title("https://example.com/story", client) == TitleResult()
 
 
 @pytest.mark.parametrize(
@@ -86,22 +138,22 @@ def test_fetch_title_reads_title_from_a_served_page():
     with httpx.Client(transport=transport) as client:
         assert (
             fetch_title("https://example.com/story", client)
-            == "Thousands march through the city centre"
+            == TitleResult("Thousands march through the city centre")
         )
 
 
 def test_fetch_title_returns_empty_for_non_200():
     transport = httpx.MockTransport(lambda request: httpx.Response(404))
     with httpx.Client(transport=transport) as client:
-        assert fetch_title("https://example.com/missing", client) == ""
+        assert fetch_title("https://example.com/missing", client) == TitleResult()
 
 
-def test_fetch_title_returns_empty_on_transport_failure():
+def test_fetch_title_retries_transport_failure():
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route to host")
 
     with httpx.Client(transport=httpx.MockTransport(boom)) as client:
-        assert fetch_title("https://example.com/down", client) == ""
+        assert fetch_title("https://example.com/down", client) == TitleResult(None)
 
 
 def test_fetch_title_rejects_a_too_short_title():
@@ -110,4 +162,4 @@ def test_fetch_title_rejects_a_too_short_title():
         lambda request: httpx.Response(200, content=page, headers={"Content-Type": "text/html"})
     )
     with httpx.Client(transport=transport) as client:
-        assert fetch_title("https://example.com/short", client) == ""
+        assert fetch_title("https://example.com/short", client) == TitleResult()

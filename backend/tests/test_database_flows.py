@@ -55,6 +55,29 @@ def add_stories(sessions):
         session.commit()
 
 
+def test_title_retry_migration_requeues_legacy_failures_only_once(database):
+    add_stories(database)
+    with database() as session:
+        session.get(db.Event, 1).article_title = ""
+        session.commit()
+        # Recreate the legacy schema before retry state existed.
+        for column in ("title_attempts", "title_first_attempt_at", "title_next_attempt_at"):
+            session.execute(text(f"ALTER TABLE events DROP COLUMN {column}"))
+        session.commit()
+    db.init_db(force=True)
+    with database() as session:
+        event = session.get(db.Event, 1)
+        assert event.article_title is None
+        assert event.title_attempts == 0
+        assert session.get(db.Event, 2).article_title == "Shared headline"
+        event.article_title = ""
+        event.title_attempts = 1
+        session.commit()
+    db.init_db(force=True)
+    with database() as session:
+        assert session.get(db.Event, 1).article_title == ""
+
+
 def test_all_ingested_stories_appear_in_feeds_without_model_review(database):
     with database() as session:
         for event_id in range(1, 5):

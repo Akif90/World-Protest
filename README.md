@@ -122,6 +122,25 @@ retry unfinished exports, processing up to 96 per cycle with newest data first.
 Transient download failures retry after 15 minutes; missing (404) exports retry
 after one day. Completed exports are not downloaded again by the scheduler.
 
+### Article-title retries
+
+Title enrichment retries network/transport failures, HTTP 408 and 429, and HTTP
+5xx responses. Delays start at 15 minutes and double up to one day. A valid
+`Retry-After` header extends the delay when necessary; retries stop seven days
+after the first title attempt. Due work runs during scheduler cycles, so a retry
+can happen later than its scheduled time. Settings are documented in
+`backend/.env.example`.
+
+A successful fetch with no usable title, or another HTTP failure such as 404 or
+410, is terminal. Pending titles remain `NULL`; successful titles contain text;
+terminal outcomes contain an empty string. Attempt count, first-attempt time and
+next-attempt time are stored separately. Title enrichment does not affect GDELT
+event identity.
+
+Startup schema updates add the retry fields automatically. Old empty-title
+records are requeued once because the old code did not preserve failure reasons.
+New terminal results are not requeued on restart.
+
 ## Roadmap (deliberately deferred)
 
 - SLM-based story clustering — future title-based deduplication; currently only GDELT IDs determine event identity.

@@ -9,12 +9,18 @@ import html
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 
-from app.config import ENRICH_BATCH_SIZE, ENRICH_TIMEOUT_SECONDS, ENRICH_WORKERS
-from app.db import Event, SessionLocal, init_db
+from app.config import (
+    ENRICH_BATCH_SIZE, ENRICH_RETRY_BASE_SECONDS, ENRICH_RETRY_MAX_DAYS,
+    ENRICH_RETRY_MAX_SECONDS, ENRICH_TIMEOUT_SECONDS, ENRICH_WORKERS,
+)
+from app.db import Event, SessionLocal, init_db, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +45,7 @@ def _clean_title(raw: str) -> str:
     title = re.sub(r"\s+", " ", title)
     # Strip trailing site-name segments ("Headline | WGCU News | PBS & NPR").
     # Titles overwhelmingly lead with the headline, so keep the FIRST segment --
-    # joining all-but-the-last silently retained middle site names, which both
-    # uglified headlines and split otherwise-identical stories apart.
+    # joining all-but-the-last silently retained middle site names in headlines.
     parts = [p for p in TITLE_SEPARATORS.split(title) if p.strip()]
     if len(parts) > 1 and len(parts[0].strip()) >= MIN_HEADLINE_SEGMENT:
         title = parts[0].strip()
@@ -70,12 +75,33 @@ def _decode(body: bytes, response: httpx.Response) -> str:
     return body.decode("utf-8", errors="replace")
 
 
-def fetch_title(url: str, client: httpx.Client) -> str:
-    """Return the page's cleaned <title>, or '' when unavailable."""
+@dataclass(frozen=True)
+class TitleResult:
+    # None means a transient failure; empty text means terminally unavailable.
+    title: str | None = ""
+    retry_at: datetime | None = None
+
+
+def _retry_after(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        if value.strip().isdigit():
+            return utcnow() + timedelta(seconds=int(value))
+        parsed = parsedate_to_datetime(value)
+        return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def fetch_title(url: str, client: httpx.Client) -> TitleResult:
+    """Fetch a cleaned title, distinguishing retryable and terminal failures."""
     try:
         with client.stream("GET", url) as resp:
+            if resp.status_code in (408, 429) or 500 <= resp.status_code < 600:
+                return TitleResult(None, _retry_after(resp.headers.get("Retry-After")))
             if resp.status_code != 200:
-                return ""
+                return TitleResult()
             chunks: list[bytes] = []
             size = 0
             found = False
@@ -94,26 +120,40 @@ def fetch_title(url: str, client: httpx.Client) -> str:
             body = b"".join(chunks)
             text = _decode(body, resp)
         if not found and b"</title>" not in body.lower():
-            return ""
+            return TitleResult()
         match = TITLE_RE.search(text)
         if not match:
-            return ""
+            return TitleResult()
         title = _clean_title(match.group(1))
-        return title if len(title) >= MIN_TITLE_LENGTH else ""
-    except Exception:
-        # Scraping the open web fails in creative ways (bad TLS, non-ASCII
-        # cookies, invalid encodings); any failure just means "no title".
-        return ""
+        return TitleResult(title if len(title) >= MIN_TITLE_LENGTH else "")
+    except (httpx.InvalidURL, httpx.UnsupportedProtocol):
+        return TitleResult()
+    except httpx.TransportError:
+        return TitleResult(None)
+    except (httpx.HTTPError, ValueError, UnicodeError):
+        # Invalid URLs, redirect loops and malformed pages are terminal.
+        return TitleResult()
 
 
 def enrich_batch(limit: int = ENRICH_BATCH_SIZE, workers: int = ENRICH_WORKERS) -> int:
-    """Fill article_title for the newest unenriched events. Returns count filled."""
+    """Process due titles, retrying transient failures within a bounded window."""
     init_db()
+    now = utcnow()
+    max_age = timedelta(days=ENRICH_RETRY_MAX_DAYS)
     with SessionLocal() as session:
+        # Expire old retries even when their next attempt is far in the future.
+        session.execute(
+            update(Event)
+            .where(Event.article_title.is_(None), Event.title_first_attempt_at <= now - max_age)
+            .values(article_title="", title_next_attempt_at=None)
+        )
+        session.commit()
         rows = session.execute(
-            select(Event.global_event_id, Event.source_url)
-            .where(Event.article_title.is_(None), Event.source_url.is_not(None))
-            .order_by(Event.ingested_at.desc())
+            select(Event.global_event_id, Event.source_url, Event.title_attempts,
+                   Event.title_first_attempt_at)
+            .where(Event.article_title.is_(None), Event.source_url.is_not(None),
+                   or_(Event.title_next_attempt_at.is_(None), Event.title_next_attempt_at <= now))
+            .order_by(func.coalesce(Event.title_next_attempt_at, Event.ingested_at), Event.global_event_id)
             .limit(limit)
         ).all()
     if not rows:
@@ -123,21 +163,36 @@ def enrich_batch(limit: int = ENRICH_BATCH_SIZE, workers: int = ENRICH_WORKERS) 
         timeout=ENRICH_TIMEOUT_SECONDS, follow_redirects=True, headers=HEADERS
     ) as client:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            titles = list(pool.map(lambda r: fetch_title(r.source_url, client), rows))
+            results = list(pool.map(lambda r: fetch_title(r.source_url, client), rows))
 
-    # '' marks an attempted-but-failed fetch, so those rows are not retried.
-    params = [
-        {"global_event_id": row.global_event_id, "article_title": title}
-        for row, title in zip(rows, titles)
-    ]
+    params = []
+    finished_at = utcnow()
+    for row, result in zip(rows, results):
+        attempts = row.title_attempts + 1
+        first_attempt = row.title_first_attempt_at or now
+        # SQLite test stores UTC datetimes without timezone information.
+        if first_attempt.tzinfo is None:
+            first_attempt = first_attempt.replace(tzinfo=timezone.utc)
+        title = result.title
+        next_attempt = None
+        if title is None:
+            delay = min(ENRICH_RETRY_MAX_SECONDS,
+                        ENRICH_RETRY_BASE_SECONDS * 2 ** min(attempts - 1, 30))
+            next_attempt = finished_at + timedelta(seconds=delay)
+            if result.retry_at is not None:
+                next_attempt = max(next_attempt, result.retry_at)
+            if next_attempt >= first_attempt + max_age:
+                title, next_attempt = "", None
+        params.append({
+            "global_event_id": row.global_event_id, "article_title": title,
+            "title_attempts": attempts, "title_first_attempt_at": first_attempt,
+            "title_next_attempt_at": next_attempt,
+        })
     with SessionLocal() as session:
-        # SQLAlchemy's bulk-update-by-primary-key: one executemany for the whole
-        # batch, replacing the previous loop that issued a primary-key SELECT
-        # followed by an UPDATE for every single event.
         session.execute(update(Event), params)
         session.commit()
 
-    filled = sum(1 for t in titles if t)
+    filled = sum(bool(p["article_title"]) for p in params)
     log.info("enriched %d/%d events with article titles", filled, len(rows))
     return filled
 
