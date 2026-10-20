@@ -51,7 +51,18 @@ services:
         condition: service_started
     ports:
       - "80:80"
+    volumes:
+      - acme_webroot:/var/www/certbot:ro
     restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot:v5.8.0
+    profiles: ["tools"]
+    volumes:
+      - certificates:/etc/letsencrypt
+      - acme_webroot:/var/www/certbot
 
 volumes:
   pgdata:
+  acme_webroot:
+  certificates:

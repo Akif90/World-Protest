@@ -1,0 +1,12 @@
+# Enable only after obtaining the first certificate through the HTTP stack.
+# Keep both Compose files in every subsequent up command.
+services:
+  frontend:
+    environment:
+      DOMAIN_NAME: ${DOMAIN_NAME:?Set DOMAIN_NAME in .env before enabling HTTPS}
+      NGINX_ENVSUBST_FILTER: ^DOMAIN_NAME$
+    ports:
+      - "443:443"
+    volumes:
+      - ./frontend/nginx.https.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - certificates:/etc/letsencrypt:ro

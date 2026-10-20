@@ -110,6 +110,85 @@ volume persists; never use `down --volumes` on the server unless intentionally
 deleting the database. Arrange off-server PostgreSQL backups before relying on
 the deployment for persistent data.
 
+### HTTPS with a domain or Duck DNS hostname
+
+These commands use `world-protest.duckdns.org`; substitute your own hostname as
+needed. Its DNS A record must resolve to the VM's public IPv4. Remove any AAAA
+record pointing somewhere else. Keep TCP port 80 open, and allow stateful TCP
+443 from `0.0.0.0/0` in OCI's attached security list or NSG (and the host firewall
+if applicable).
+
+Pull the latest code, then configure the hostname without replacing your existing
+database password:
+
+```bash
+git pull --ff-only
+python3 - <<'PYENV'
+from pathlib import Path
+p = Path('.env')
+lines = p.read_text().splitlines()
+settings = {
+    'DOMAIN_NAME': 'world-protest.duckdns.org',
+    'ALLOWED_ORIGINS': 'https://world-protest.duckdns.org',
+    'VITE_API_BASE': '',
+}
+result = [line for line in lines if line.split('=', 1)[0] not in settings]
+result += [f'{key}={value}' for key, value in settings.items()]
+p.write_text('\n'.join(result) + '\n')
+PYENV
+```
+
+First-time bootstrap only: start the HTTP configuration with its ACME challenge
+route and shared webroot. Do not run this HTTP-only `up` command after enabling
+HTTPS; always use both Compose files then.
+
+```bash
+sudo docker compose up -d --build
+getent ahostsv4 world-protest.duckdns.org
+```
+
+Confirm DNS resolves to the VM's IP. Request a certificate using the existing HTTP
+server. Certbot prompts for an email address and acceptance of the CA's terms:
+
+```bash
+sudo docker compose run --rm certbot certonly \
+  --webroot -w /var/www/certbot \
+  --cert-name world-protest.duckdns.org \
+  -d world-protest.duckdns.org
+```
+
+Only after certificate issuance succeeds, enable TLS and HTTP-to-HTTPS redirects:
+
+```bash
+sudo docker compose -f docker-compose.yml -f docker-compose.https.yml up -d
+```
+
+Open <https://world-protest.duckdns.org>. Subsequent updates must retain the HTTPS
+overlay:
+
+```bash
+git pull --ff-only
+sudo docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+```
+
+Certificates and ACME account keys persist in the `certificates` Docker volume.
+Never delete that volume as part of an update. The frontend mounts it read-only;
+Certbot alone writes renewed certificates. The Duck DNS token is not needed for
+this HTTP validation method. If the VM's public IP changes, update Duck DNS.
+
+Schedule renewal twice daily on the VM (adjust the path if the checkout is
+elsewhere). This is a root cron job, independent of any Codex scheduling:
+
+```bash
+printf '%s\n' '17 3,15 * * * root /bin/sh /home/ubuntu/World-Protest/scripts/renew-certificates.sh >> /var/log/world-protest-certificates.log 2>&1' | sudo tee /etc/cron.d/world-protest-certificates
+sudo chmod 644 /etc/cron.d/world-protest-certificates
+```
+
+The renewal script reloads Nginx after Certbot succeeds. Inspect
+`/var/log/world-protest-certificates.log` if scheduled renewals fail. Keep ports
+80 and 443 reachable. To return to HTTP intentionally, run the base Compose file
+alone; this recreates the frontend without TLS while preserving stored certs.
+
 Run the initial history import once after the services are healthy:
 
 ```bash
