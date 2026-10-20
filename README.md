@@ -46,22 +46,69 @@ and a production frontend served by Nginx:
 docker compose up --build
 ```
 
-Open <http://localhost>. The API is also available directly at
-<http://localhost:8000>. PostgreSQL is available only inside the Compose network.
-The browser calls the backend directly; Nginx serves the frontend files.
-Backend CORS permits the frontend origins `http://localhost` and
-`http://127.0.0.1`.
+Open <http://localhost>. Nginx serves the frontend and proxies `/api/` to
+FastAPI, so browser requests use the same origin. The API is also available at
+<http://localhost:8000> on the Docker host only. PostgreSQL is available only
+inside the Compose network.
 
-For a different host, set the browser-accessible API URL and frontend origin
-before building, for example:
+Compose defaults are for local development. For deployment, configure the root
+`.env` as described below. `VITE_API_BASE` is empty by default (same-origin API);
+setting it to another URL requires rebuilding the frontend.
+
+### First deployment over HTTP on a VPS
+
+Requires Docker Engine, the Compose plugin, Git, and an internet-connected public
+subnet. On a fresh VM, clone this repository and run from its root:
 
 ```bash
-VITE_API_BASE=https://api.example.com ALLOWED_ORIGINS=https://app.example.com docker compose up --build
+umask 077
+cp .env.example .env
+python3 - <<'PYENV'
+from pathlib import Path
+import secrets
+p = Path('.env')
+s = p.read_text().replace('POSTGRES_PASSWORD=wpa', 'POSTGRES_PASSWORD=' + secrets.token_hex(24))
+s = s.replace('ALLOWED_ORIGINS=http://localhost,http://127.0.0.1',
+              'ALLOWED_ORIGINS=http://140.245.2.31')
+p.write_text(s)
+PYENV
+sudo docker compose up -d --build
+sudo docker compose ps
+sudo docker compose logs --tail=80 backend scheduler
 ```
 
-`VITE_API_BASE` is compiled into the frontend, so changing it requires a rebuild.
-Use an address the browser can reach; the Compose service name `backend` only
-resolves inside Docker. Both public endpoints should use HTTPS when deploying.
+Replace `140.245.2.31` with your public IP if it changes. Run the password setup
+only before the first database initialization: changing `.env` later does not
+change the password stored in an existing PostgreSQL volume. Keep `.env` private
+and backed up; do not commit it. The generated hexadecimal password can safely be
+embedded in the database connection URL.
+
+In OCI, allow stateful TCP ingress on destination port 80 from `0.0.0.0/0` in the
+subnet's attached security list or instance NSG. Keep SSH limited to your own IP;
+ports 8000 and 5432 do not need public ingress. An enabled Internet Gateway and
+the subnet's `0.0.0.0/0` route to it are also required. If the VM's host firewall
+blocks HTTP, allow TCP 80 there while preserving SSH and OCI's existing rules.
+
+Open <http://140.245.2.31> (or your VM's IP). To inspect startup locally on the VM:
+
+```bash
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS 'http://127.0.0.1/api/points?zoom=0&days=1'
+```
+
+The scheduler ingests the latest export on startup, so the first display can take
+a little time to populate. For a small initial history import:
+
+```bash
+sudo docker compose exec backend python -m app.ingest.backfill --days 1
+```
+
+Use HTTPS after attaching a domain. PWA installation and service worker features
+require a secure context and will not work at a public HTTP IP. For updates, run
+`git pull --ff-only` followed by `sudo docker compose up -d --build`. The database
+volume persists; never use `down --volumes` on the server unless intentionally
+deleting the database. Arrange off-server PostgreSQL backups before relying on
+the deployment for persistent data.
 
 Run the initial history import once after the services are healthy:
 
@@ -87,9 +134,11 @@ cd frontend && npm test                # headline/slug, search, globe geometry
 ## Configuration
 
 Everything has a development default, so a fresh clone runs unconfigured. For
-deployment see [backend/.env.example](backend/.env.example) — `ALLOWED_ORIGINS`
-in particular **must** be set, or the browser blocks every API call with a CORS
-error.
+Docker deployment see [.env.example](.env.example) and the VPS instructions
+above. Additional backend settings are documented in
+[backend/.env.example](backend/.env.example). CORS origins must match the frontend
+when calling the API from a separate origin; the default Nginx setup uses a
+same-origin proxy.
 
 ## API
 
