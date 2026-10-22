@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { latLngToCell } from "h3-js";
 import Globe from "./Globe";
+import { HEATMAP_ALTITUDE } from "./globe-heatmap";
 import { API_CACHE_TTL_MS, fetchPoints } from "./api";
 
 const mock = vi.hoisted(() => ({
@@ -13,7 +14,6 @@ const mock = vi.hoisted(() => ({
   hexLabel: undefined as undefined | ((bin: unknown) => string),
   onHexClick: undefined as undefined | ((bin: unknown) => void),
   labelAltitude: 0,
-  heatmapAltitude: 0,
   hexAltitude: 0,
 }));
 vi.mock("./places", () => ({
@@ -30,12 +30,12 @@ vi.mock("globe.gl", () => ({
             Object.assign(mock.pov, value);
             return fluent;
           };
+          if (key === "getGlobeRadius") return () => 100;
           // three-globe clears color after its image texture finishes loading.
           if (key === "getScreenCoords") return () => ({ x: 100, y: 100 });
           if (key === "globeMaterial") return () => ({ color: null });
           return (...args: unknown[]) => {
             if (key === "htmlAltitude") mock.labelAltitude = args[0] as number;
-            if (key === "heatmapBaseAltitude") mock.heatmapAltitude = args[0] as number;
             if (key === "hexAltitude") mock.hexAltitude = args[0] as number;
             if (key === "htmlElementsData") mock.labels(...args);
             if (key === "hexBinPointsData") mock.hexes(...args);
@@ -52,6 +52,7 @@ vi.mock("globe.gl", () => ({
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
+  vi.stubGlobal("Worker", class { postMessage = vi.fn(); terminate = vi.fn(); });
   vi.useFakeTimers();
   vi.clearAllMocks();
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
@@ -67,6 +68,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 async function mount() {
@@ -77,7 +79,7 @@ async function advance(ms: number) {
 }
 it("keeps labels above coverage surfaces that would otherwise clip text", async () => {
   await mount();
-  expect(mock.labelAltitude).toBeGreaterThan(mock.heatmapAltitude);
+  expect(mock.labelAltitude).toBeGreaterThan(HEATMAP_ALTITUDE);
   expect(mock.labelAltitude).toBeGreaterThan(mock.hexAltitude);
 });
 it("refreshes labels after zooming and after a stationary pan", async () => {

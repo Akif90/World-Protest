@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import GlobeGL from "globe.gl";
+import { createGlobeHeatmap } from "./globe-heatmap";
 import { latLngToCell } from "h3-js";
 import type { Bbox, GridPoint, PointsResponse } from "./api";
 import { API_CACHE_TTL_MS, fetchPoints } from "./api";
@@ -54,6 +55,7 @@ interface GlobeProps {
 export default function Globe({ days, onSelect, apiRef, theme = "light" }: GlobeProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const globeRef = useRef<InstanceType<typeof GlobeGL> | null>(null);
+  const heatmapRef = useRef<ReturnType<typeof createGlobeHeatmap> | null>(null);
   const zoomRef = useRef(0);
   const daysRef = useRef(days);
   const currentHexBinsRef = useRef(new Map<string, CurrentHexBin>());
@@ -98,17 +100,6 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
         onSelectRef.current({ lat, lon: lng, count: 0, mentions: 0, top_location: null },
           Math.max(cellSizeRef.current, zoomRef.current <= HEATMAP_MAX_ZOOM ? 3 : 0.6));
       })
-      // Density layer A: heatmap, shown when zoomed out. Flat (colour only) so
-      // it never occludes the globe or the labels underneath.
-      .heatmapPoints((d) => d as object[])
-      .heatmapPointLat((d) => (d as GridPoint).lat)
-      .heatmapPointLng((d) => (d as GridPoint).lon)
-      .heatmapPointWeight((d) => (d as GridPoint).count)
-      .heatmapBaseAltitude(0.007)
-      // NOTE: heatmapColorFn is an accessor that must RETURN an interpolator
-      // (t => colour), not a colour. Returning a colour renders nothing.
-      .heatmapColorFn(() => (t: number) => rampColor(t, Math.min(0.85, t * 1.8)))
-      .heatmapsTransitionDuration(400)
       // Density layer B: hex bins, shown when zoomed in. Uniform cells, colour
       // carries the count, and each hex is a clean tap target.
       .hexBinPointLat((d) => (d as GridPoint).lat)
@@ -151,6 +142,10 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
         );
       });
 
+    const heatmap = createGlobeHeatmap(globe.getGlobeRadius());
+    heatmapRef.current = heatmap;
+    globe.customThreeObject(() => heatmap.mesh).customLayerData([{}]);
+
     // globe.gl only emits onZoom for user-driven camera moves, so poll the
     // camera instead — it also covers programmatic pointOfView flights.
     const zoomPoll = window.setInterval(() => {
@@ -177,7 +172,7 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
     }, 250);
 
     const mat = globe.globeMaterial();
-    mat.shininess = 8;
+    if ("shininess" in mat) mat.shininess = 8;
 
     const w0 = containerRef.current.clientWidth;
     const h0 = containerRef.current.clientHeight;
@@ -235,6 +230,8 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
       loadPendingRef.current = false;
       labelKeyRef.current = "";
       scheduledLabelKeyRef.current = "";
+      heatmap.dispose();
+      heatmapRef.current = null;
       globe._destructor();
       labelElements.clear();
       visibleLabelsRef.current = [];
@@ -400,8 +397,10 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
     if (zoom <= HEATMAP_MAX_ZOOM) {
       currentHexBinsRef.current.clear();
       // Heatmap owns the view; clear hexes so the two never overlap.
-      globe.hexBinPointsData([]).heatmapsData([res.points]);
+      globe.hexBinPointsData([]);
+      heatmapRef.current?.update(res.points);
     } else {
+      heatmapRef.current?.clear();
       const resolution = HEX_RES_BY_ZOOM[zoom] ?? 4;
       // globe.gl bins with H3 internally but never exposes the bin totals, so
       // replicate the binning here to colour against the TRUE maximum rather
@@ -428,7 +427,6 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
       const norm = (w: number) => Math.log1p(Math.max(0, w)) / Math.log1p(maxBin);
 
       globe
-        .heatmapsData([])
         .hexBinResolution(resolution)
         .hexTopColor((d) => {
           const t = norm((d as HexBin).sumWeight);
@@ -446,7 +444,8 @@ export default function Globe({ days, onSelect, apiRef, theme = "light" }: Globe
   useEffect(() => {
     // Remove old hexes and their hover target while the new range loads.
     currentHexBinsRef.current.clear();
-    globeRef.current?.hexBinPointsData([]).heatmapsData([]);
+    globeRef.current?.hexBinPointsData([]);
+    heatmapRef.current?.clear();
     void load();
     const refresh = window.setInterval(() => { void load(); }, API_CACHE_TTL_MS + 1000);
     return () => window.clearInterval(refresh);
