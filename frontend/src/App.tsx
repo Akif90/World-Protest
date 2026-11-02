@@ -74,6 +74,7 @@ export default function App() {
 
   return (
     <div className="app" data-theme={theme}>
+      <a className="skip-link" href="#world-globe">Skip to globe</a>
       <header className="topbar">
         <div className="brand"><span className="brand-globe" aria-hidden="true">◎</span>World Protest</div>
         <SearchBar onSelect={selectPlace} />
@@ -84,46 +85,56 @@ export default function App() {
         </button>
       </header>
 
-      <section className="explorer-intro" aria-label="Explore protest coverage">
-        <h1>A world in<br />movement.</h1>
-        <p>Explore protests around the world. Choose a place to see its coverage.</p>
-        <nav className="range-picker" aria-label="Time range">
-          {DATE_RANGES.map(({ label, days: d }) => (
-            <button
-              key={label}
-              className={d === days ? "active" : ""}
-              aria-pressed={d === days}
-              onClick={() => setDays(d)}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-      </section>
+      <div className="explorer-workspace">
+        <div className="explorer-sidebar">
+          <section className="explorer-intro" aria-label="Explore protest coverage">
+            <h1>A world in<br /> movement.</h1>
+            <p>Explore protests around the world. Choose a place to see its coverage.</p>
+            <nav className="range-picker" aria-label="Time range">
+              {DATE_RANGES.map(({ label, days: d }) => (
+                <button
+                  key={label}
+                  className={d === days ? "active" : ""}
+                  aria-pressed={d === days}
+                  onClick={() => setDays(d)}
+                >
+                  {label}
+                </button>
+              ))}
+            </nav>
+          </section>
+          <EventPanel selection={selection} days={days} onClose={() => setSelection(null)} />
+        </div>
 
-      <main className="globe-stage" aria-label="World protest globe">
-      <Suspense fallback={<div className="globe-loading">Loading globe…</div>}>
-        <Globe
-          theme={theme}
-          days={days}
-          apiRef={globeApi}
-          onSelect={(point, cellSize) =>
-            setSelection({
-              lat: point.lat,
-              lon: point.lon,
-              name: point.top_location,
-              cellSize,
-            })
-          }
-        />
-      </Suspense>
-      <div className="globe-controls" aria-label="Globe navigation">
-        <button aria-label="Zoom in" onClick={() => globeApi.current?.zoom(0.75)}>+</button>
-        <button aria-label="Zoom out" onClick={() => globeApi.current?.zoom(1.35)}>−</button>
-        <button className="reset-globe" aria-label="Reset globe view" onClick={() => globeApi.current?.reset()}>↺</button>
+        <div className="map-workspace">
+          <main id="world-globe" className="globe-stage" aria-label="World protest globe" tabIndex={-1}>
+            <Suspense fallback={<div className="globe-loading">Loading globe…</div>}>
+              <Globe
+                theme={theme}
+                days={days}
+                apiRef={globeApi}
+                onSelect={(point, cellSize) =>
+                  setSelection({
+                    lat: point.lat,
+                    lon: point.lon,
+                    name: point.top_location,
+                    cellSize,
+                  })
+                }
+              />
+            </Suspense>
+            <div className="globe-controls" aria-label="Globe navigation">
+              <button aria-label="Zoom in" onClick={() => globeApi.current?.zoom(0.75)}>+</button>
+              <button aria-label="Zoom out" onClick={() => globeApi.current?.zoom(1.35)}>−</button>
+              <button className="reset-globe" aria-label="Reset globe view" onClick={() => globeApi.current?.reset()}>↺</button>
+            </div>
+          </main>
+          <div className="map-caption">
+            <span>Drag to explore · Scroll to zoom</span>
+            <span className="density-legend">Fewer <i aria-hidden="true" /> More events</span>
+          </div>
+        </div>
       </div>
-      </main>
-      <div className="map-caption"><span>Drag to explore · Scroll to zoom</span><span className="density-legend">Fewer <i aria-hidden="true" /> More events</span></div>
 
       <button
         className="trending-toggle"
@@ -136,8 +147,6 @@ export default function App() {
       </button>
 
       <TrendingPanel days={days} onSelect={selectTrending} open={trendingOpen} />
-
-      <EventPanel selection={selection} days={days} onClose={() => setSelection(null)} />
     </div>
   );
 }

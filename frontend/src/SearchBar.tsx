@@ -88,8 +88,10 @@ export default function SearchBar({ onSelect }: SearchBarProps) {
   return (
     <div className="search" ref={rootRef}>
       <input
-        type="text"
-        placeholder="Search a place"
+        type="search"
+        name="place"
+        autoComplete="off"
+        placeholder="Search a place…"
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);

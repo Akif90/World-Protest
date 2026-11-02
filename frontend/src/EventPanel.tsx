@@ -111,10 +111,10 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
   if (!selection) return null;
 
   return (
-    <aside className="event-panel">
+    <aside className="event-panel" aria-labelledby="selected-region-title">
       <header>
         <div>
-          <h2>{selection.name ?? "Selected region"}</h2>
+          <h2 id="selected-region-title">{selection.name ?? "Selected region"}</h2>
           <p className="muted">
             {/* Only a total fetched for this selection and range is current. */}
             {total?.selection === selection && total.days === days
@@ -142,9 +142,13 @@ export default function EventPanel({ selection, days, onClose }: EventPanelProps
               <span className="trending-badge">Trending</span>
             )}
             <div className="event-headline">{eventHeadline(e)}</div>
-            <div className="muted">
-              {e.location_name ?? "Unknown location"} · {e.date} · {e.num_mentions}{" "}
-              mention{e.num_mentions === 1 ? "" : "s"}
+            <div className="muted event-meta">
+              <span>{e.location_name ?? "Unknown location"}</span>
+              <div className="event-meta-details">
+                <time dateTime={e.date}>{e.date}</time>
+                <span aria-hidden="true">·</span>
+                <span>{e.num_mentions} mention{e.num_mentions === 1 ? "" : "s"}</span>
+              </div>
             </div>
             {e.source_url && (
               <a

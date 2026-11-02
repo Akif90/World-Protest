@@ -48,7 +48,7 @@ export default function TrendingPanel({ days, onSelect, open }: TrendingPanelPro
   const item = (e: ProtestEvent, meta: string) => (
     <li key={e.id}>
       <button onClick={() => onSelect(e)}>
-        <span className="event-loc">{e.location_name ?? "Unknown location"}</span>
+        <span className="event-loc" title={e.location_name ?? "Unknown location"}>{e.location_name ?? "Unknown location"}</span>
         <span className="event-headline">{eventHeadline(e)}</span>
         <span className="muted">
           {meta}
