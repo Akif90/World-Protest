@@ -203,6 +203,13 @@ The 7d and 30d filters can only show older events after that history has been
 imported. If you previously imported two days, run the 30-day backfill once;
 it upserts existing events.
 
+## CI/CD
+
+GitHub Actions runs backend tests (including PostgreSQL integration tests),
+frontend lint/tests/build, and Docker build checks. Successful `main` runs can
+deploy over SSH to the existing VM once configured. See [CI/CD setup](docs/ci-cd.md)
+for the required secrets, variables, VM prerequisites, and recovery instructions.
+
 ## Tests
 
 ```bash
